@@ -23,12 +23,6 @@ enum plink_state {
 	BLOCKED
 };
 
-enum plink_actions {
-	PLINK_ACTION_UNDEFINED,
-	PLINK_ACTION_OPEN,
-	PLINK_ACTION_BLOCK,
-};
-
 
 static int print_mpath_handler(struct nl_msg *msg, void *arg)
 {
@@ -38,7 +32,7 @@ static int print_mpath_handler(struct nl_msg *msg, void *arg)
 	char dst[20], next_hop[20], dev[20];
 	static struct nla_policy mpath_policy[NL80211_MPATH_INFO_MAX + 1] = {
 		[NL80211_MPATH_INFO_FRAME_QLEN] = { .type = NLA_U32 },
-		[NL80211_MPATH_INFO_DSN] = { .type = NLA_U32 },
+		[NL80211_MPATH_INFO_SN] = { .type = NLA_U32 },
 		[NL80211_MPATH_INFO_METRIC] = { .type = NLA_U32 },
 		[NL80211_MPATH_INFO_EXPTIME] = { .type = NLA_U32 },
 		[NL80211_MPATH_INFO_DISCOVERY_TIMEOUT] = { .type = NLA_U32 },
@@ -56,13 +50,13 @@ static int print_mpath_handler(struct nl_msg *msg, void *arg)
 	 */
 
 	if (!tb[NL80211_ATTR_MPATH_INFO]) {
-		fprintf(stderr, "mpath info missing!");
+		fprintf(stderr, "mpath info missing!\n");
 		return NL_SKIP;
 	}
 	if (nla_parse_nested(pinfo, NL80211_MPATH_INFO_MAX,
 			     tb[NL80211_ATTR_MPATH_INFO],
 			     mpath_policy)) {
-		fprintf(stderr, "failed to parse nested attributes!");
+		fprintf(stderr, "failed to parse nested attributes!\n");
 		return NL_SKIP;
 	}
 
@@ -70,9 +64,9 @@ static int print_mpath_handler(struct nl_msg *msg, void *arg)
 	mac_addr_n2a(next_hop, nla_data(tb[NL80211_ATTR_MPATH_NEXT_HOP]));
 	if_indextoname(nla_get_u32(tb[NL80211_ATTR_IFINDEX]), dev);
 	printf("%s %s %s", dst, next_hop, dev);
-	if (pinfo[NL80211_MPATH_INFO_DSN])
+	if (pinfo[NL80211_MPATH_INFO_SN])
 		printf("\t%u",
-			nla_get_u32(pinfo[NL80211_MPATH_INFO_DSN]));
+			nla_get_u32(pinfo[NL80211_MPATH_INFO_SN]));
 	if (pinfo[NL80211_MPATH_INFO_METRIC])
 		printf("\t%u",
 			nla_get_u32(pinfo[NL80211_MPATH_INFO_METRIC]));
@@ -99,7 +93,8 @@ static int print_mpath_handler(struct nl_msg *msg, void *arg)
 static int handle_mpath_get(struct nl80211_state *state,
 			    struct nl_cb *cb,
 			    struct nl_msg *msg,
-			    int argc, char **argv)
+			    int argc, char **argv,
+			    enum id_input id)
 {
 	unsigned char dst[ETH_ALEN];
 
@@ -134,7 +129,8 @@ COMMAND(mpath, del, "<MAC address>",
 static int handle_mpath_set(struct nl80211_state *state,
 			    struct nl_cb *cb,
 			    struct nl_msg *msg,
-			    int argc, char **argv)
+			    int argc, char **argv,
+			    enum id_input id)
 {
 	unsigned char dst[ETH_ALEN];
 	unsigned char next_hop[ETH_ALEN];
@@ -182,8 +178,11 @@ COMMAND(mpath, set, "<destination MAC address> next_hop <next hop MAC address>",
 static int handle_mpath_dump(struct nl80211_state *state,
 			     struct nl_cb *cb,
 			     struct nl_msg *msg,
-			     int argc, char **argv)
+			     int argc, char **argv,
+			     enum id_input id)
 {
+	printf("DEST ADDR         NEXT HOP          IFACE\tSN\tMETRIC\tQLEN\t"
+	       "EXPTIME\t\tDTIM\tDRET\tFLAGS\n");
 	nl_cb_set(cb, NL_CB_VALID, NL_CB_CUSTOM, print_mpath_handler, NULL);
 	return 0;
 }

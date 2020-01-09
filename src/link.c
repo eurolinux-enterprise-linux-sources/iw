@@ -44,13 +44,13 @@ static int link_bss_handler(struct nl_msg *msg, void *arg)
 		  genlmsg_attrlen(gnlh, 0), NULL);
 
 	if (!tb[NL80211_ATTR_BSS]) {
-		fprintf(stderr, "bss info missing!");
+		fprintf(stderr, "bss info missing!\n");
 		return NL_SKIP;
 	}
 	if (nla_parse_nested(bss, NL80211_BSS_MAX,
 			     tb[NL80211_ATTR_BSS],
 			     bss_policy)) {
-		fprintf(stderr, "failed to parse nested attributes!");
+		fprintf(stderr, "failed to parse nested attributes!\n");
 		return NL_SKIP;
 	}
 
@@ -70,6 +70,9 @@ static int link_bss_handler(struct nl_msg *msg, void *arg)
 	case NL80211_BSS_STATUS_AUTHENTICATED:
 		printf("Authenticated with %s (on %s)\n", mac_addr, dev);
 		return NL_SKIP;
+	case NL80211_BSS_STATUS_IBSS_JOINED:
+		printf("Joined IBSS %s (on %s)\n", mac_addr, dev);
+		break;
 	default:
 		return NL_SKIP;
 	}
@@ -97,7 +100,8 @@ static int link_bss_handler(struct nl_msg *msg, void *arg)
 static int handle_scan_for_link(struct nl80211_state *state,
 				struct nl_cb *cb,
 				struct nl_msg *msg,
-				int argc, char **argv)
+				int argc, char **argv,
+				enum id_input id)
 {
 	if (argc > 0)
 		return 1;
@@ -111,7 +115,7 @@ static int print_link_sta(struct nl_msg *msg, void *arg)
 	struct nlattr *tb[NL80211_ATTR_MAX + 1];
 	struct genlmsghdr *gnlh = nlmsg_data(nlmsg_hdr(msg));
 	struct nlattr *sinfo[NL80211_STA_INFO_MAX + 1];
-	struct nlattr *rinfo[NL80211_RATE_INFO_MAX + 1];
+	struct nlattr *binfo[NL80211_STA_BSS_PARAM_MAX + 1];
 	static struct nla_policy stats_policy[NL80211_STA_INFO_MAX + 1] = {
 		[NL80211_STA_INFO_INACTIVE_TIME] = { .type = NLA_U32 },
 		[NL80211_STA_INFO_RX_BYTES] = { .type = NLA_U32 },
@@ -124,25 +128,25 @@ static int print_link_sta(struct nl_msg *msg, void *arg)
 		[NL80211_STA_INFO_PLID] = { .type = NLA_U16 },
 		[NL80211_STA_INFO_PLINK_STATE] = { .type = NLA_U8 },
 	};
-
-	static struct nla_policy rate_policy[NL80211_RATE_INFO_MAX + 1] = {
-		[NL80211_RATE_INFO_BITRATE] = { .type = NLA_U16 },
-		[NL80211_RATE_INFO_MCS] = { .type = NLA_U8 },
-		[NL80211_RATE_INFO_40_MHZ_WIDTH] = { .type = NLA_FLAG },
-		[NL80211_RATE_INFO_SHORT_GI] = { .type = NLA_FLAG },
+	static struct nla_policy bss_policy[NL80211_STA_BSS_PARAM_MAX + 1] = {
+		[NL80211_STA_BSS_PARAM_CTS_PROT] = { .type = NLA_FLAG },
+		[NL80211_STA_BSS_PARAM_SHORT_PREAMBLE] = { .type = NLA_FLAG },
+		[NL80211_STA_BSS_PARAM_SHORT_SLOT_TIME] = { .type = NLA_FLAG },
+		[NL80211_STA_BSS_PARAM_DTIM_PERIOD] = { .type = NLA_U8 },
+		[NL80211_STA_BSS_PARAM_BEACON_INTERVAL] = { .type = NLA_U16 },
 	};
 
 	nla_parse(tb, NL80211_ATTR_MAX, genlmsg_attrdata(gnlh, 0),
 		  genlmsg_attrlen(gnlh, 0), NULL);
 
 	if (!tb[NL80211_ATTR_STA_INFO]) {
-		fprintf(stderr, "sta stats missing!");
+		fprintf(stderr, "sta stats missing!\n");
 		return NL_SKIP;
 	}
 	if (nla_parse_nested(sinfo, NL80211_STA_INFO_MAX,
 			     tb[NL80211_ATTR_STA_INFO],
 			     stats_policy)) {
-		fprintf(stderr, "failed to parse nested attributes!");
+		fprintf(stderr, "failed to parse nested attributes!\n");
 		return NL_SKIP;
 	}
 
@@ -159,22 +163,34 @@ static int print_link_sta(struct nl_msg *msg, void *arg)
 			(int8_t)nla_get_u8(sinfo[NL80211_STA_INFO_SIGNAL]));
 
 	if (sinfo[NL80211_STA_INFO_TX_BITRATE]) {
-		if (nla_parse_nested(rinfo, NL80211_RATE_INFO_MAX,
-				     sinfo[NL80211_STA_INFO_TX_BITRATE], rate_policy)) {
-			fprintf(stderr, "failed to parse nested rate attributes!");
-		} else {
-			printf("\ttx bitrate: ");
-			if (rinfo[NL80211_RATE_INFO_BITRATE]) {
-				int rate = nla_get_u16(rinfo[NL80211_RATE_INFO_BITRATE]);
-				printf("%d.%d MBit/s", rate / 10, rate % 10);
-			}
+		char buf[100];
 
-			if (rinfo[NL80211_RATE_INFO_MCS])
-				printf(" MCS %d", nla_get_u8(rinfo[NL80211_RATE_INFO_MCS]));
-			if (rinfo[NL80211_RATE_INFO_40_MHZ_WIDTH])
-				printf(" 40Mhz");
-			if (rinfo[NL80211_RATE_INFO_SHORT_GI])
-				printf(" short GI");
+		parse_tx_bitrate(sinfo[NL80211_STA_INFO_TX_BITRATE], buf, sizeof(buf));
+		printf("\ttx bitrate: %s\n", buf);
+	}
+
+	if (sinfo[NL80211_STA_INFO_BSS_PARAM]) {
+		if (nla_parse_nested(binfo, NL80211_STA_BSS_PARAM_MAX,
+				     sinfo[NL80211_STA_INFO_BSS_PARAM],
+				     bss_policy)) {
+			fprintf(stderr, "failed to parse nested bss parameters!\n");
+		} else {
+			char *delim = "";
+			printf("\n\tbss flags:\t");
+			if (binfo[NL80211_STA_BSS_PARAM_CTS_PROT]) {
+				printf("CTS-protection");
+				delim = " ";
+			}
+			if (binfo[NL80211_STA_BSS_PARAM_SHORT_PREAMBLE]) {
+				printf("%sshort-preamble", delim);
+				delim = " ";
+			}
+			if (binfo[NL80211_STA_BSS_PARAM_SHORT_SLOT_TIME])
+				printf("%sshort-slot-time", delim);
+			printf("\n\tdtim period:\t%d",
+			       nla_get_u8(binfo[NL80211_STA_BSS_PARAM_DTIM_PERIOD]));
+			printf("\n\tbeacon int:\t%d",
+			       nla_get_u16(binfo[NL80211_STA_BSS_PARAM_BEACON_INTERVAL]));
 			printf("\n");
 		}
 	}
@@ -185,7 +201,8 @@ static int print_link_sta(struct nl_msg *msg, void *arg)
 static int handle_link_sta(struct nl80211_state *state,
 			   struct nl_cb *cb,
 			   struct nl_msg *msg,
-			   int argc, char **argv)
+			   int argc, char **argv,
+			   enum id_input id)
 {
 	unsigned char mac_addr[ETH_ALEN];
 
@@ -213,7 +230,8 @@ static int handle_link_sta(struct nl80211_state *state,
 }
 
 static int handle_link(struct nl80211_state *state, struct nl_cb *cb,
-		       struct nl_msg *msg, int argc, char **argv)
+		       struct nl_msg *msg, int argc, char **argv,
+		       enum id_input id)
 {
 	char *link_argv[] = {
 		NULL,
@@ -232,7 +250,7 @@ static int handle_link(struct nl80211_state *state, struct nl_cb *cb,
 	int err;
 
 	link_argv[0] = argv[0];
-	err = handle_cmd(state, II_NETDEV, 3, link_argv);
+	err = handle_cmd(state, id, 3, link_argv);
 	if (err)
 		return err;
 
@@ -247,7 +265,7 @@ static int handle_link(struct nl80211_state *state, struct nl_cb *cb,
 
 	station_argv[0] = argv[0];
 	station_argv[3] = bssid_buf;
-	return handle_cmd(state, II_NETDEV, 4, station_argv);
+	return handle_cmd(state, id, 4, station_argv);
 }
 TOPLEVEL(link, NULL, 0, 0, CIB_NETDEV, handle_link,
 	 "Print information about the current link, if any.");

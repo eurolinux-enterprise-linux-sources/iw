@@ -105,13 +105,12 @@ static int get_if_type(int *argc, char ***argv, enum nl80211_iftype *type,
 	} else if (strcmp(tpstr, "monitor") == 0) {
 		*type = NL80211_IFTYPE_MONITOR;
 		return 0;
-	} else if (strcmp(tpstr, "master") == 0) {
+	} else if (strcmp(tpstr, "master") == 0 ||
+		   strcmp(tpstr, "ap") == 0) {
 		*type = NL80211_IFTYPE_UNSPECIFIED;
-		fprintf(stderr, "See http://wireless.kernel.org/RTFM-AP.\n");
-		return 2;
-	} else if (strcmp(tpstr, "ap") == 0) {
-		*type = NL80211_IFTYPE_UNSPECIFIED;
-		fprintf(stderr, "See http://wireless.kernel.org/RTFM-AP.\n");
+		fprintf(stderr, "You need to run a management daemon, e.g. hostapd,\n");
+		fprintf(stderr, "see http://wireless.kernel.org/en/users/Documentation/hostapd\n");
+		fprintf(stderr, "for more information on how to do that.\n");
 		return 2;
 	} else if (strcmp(tpstr, "__ap") == 0) {
 		*type = NL80211_IFTYPE_AP;
@@ -131,16 +130,40 @@ static int get_if_type(int *argc, char ***argv, enum nl80211_iftype *type,
 		   strcmp(tpstr, "mesh") == 0) {
 		*type = NL80211_IFTYPE_MESH_POINT;
 		return 0;
+	} else if (strcmp(tpstr, "__p2pcl") == 0) {
+		*type = NL80211_IFTYPE_P2P_CLIENT;
+		return 0;
+	} else if (strcmp(tpstr, "__p2pdev") == 0) {
+		*type = NL80211_IFTYPE_P2P_DEVICE;
+		return 0;
+	} else if (strcmp(tpstr, "__p2pgo") == 0) {
+		*type = NL80211_IFTYPE_P2P_GO;
+		return 0;
 	}
 
 	fprintf(stderr, "invalid interface type %s\n", tpstr);
 	return 2;
 }
 
+static int parse_4addr_flag(const char *value, struct nl_msg *msg)
+{
+	if (strcmp(value, "on") == 0)
+		NLA_PUT_U8(msg, NL80211_ATTR_4ADDR, 1);
+	else if (strcmp(value, "off") == 0)
+		NLA_PUT_U8(msg, NL80211_ATTR_4ADDR, 0);
+	else
+		return 1;
+	return 0;
+
+nla_put_failure:
+	return 1;
+}
+
 static int handle_interface_add(struct nl80211_state *state,
 				struct nl_cb *cb,
 				struct nl_msg *msg,
-				int argc, char **argv)
+				int argc, char **argv,
+				enum id_input id)
 {
 	char *name;
 	char *mesh_id = NULL;
@@ -168,6 +191,15 @@ static int handle_interface_add(struct nl80211_state *state,
 			mesh_id = argv[0];
 			argc--;
 			argv++;
+		} else if (strcmp(argv[0], "4addr") == 0) {
+			argc--;
+			argv++;
+			if (parse_4addr_flag(argv[0], msg)) {
+				fprintf(stderr, "4addr error\n");
+				return 2;
+			}
+			argc--;
+			argv++;
 		} else if (strcmp(argv[0], "flags") == 0) {
 			argc--;
 			argv++;
@@ -192,26 +224,63 @@ static int handle_interface_add(struct nl80211_state *state,
  nla_put_failure:
 	return -ENOBUFS;
 }
-COMMAND(interface, add, "<name> type <type> [mesh_id <meshid>] [flags <flag>*]",
+COMMAND(interface, add, "<name> type <type> [mesh_id <meshid>] [4addr on|off] [flags <flag>*]",
 	NL80211_CMD_NEW_INTERFACE, 0, CIB_PHY, handle_interface_add,
 	"Add a new virtual interface with the given configuration.\n"
 	IFACE_TYPES "\n\n"
 	"The flags are only used for monitor interfaces, valid flags are:\n"
 	VALID_FLAGS "\n\n"
 	"The mesh_id is used only for mesh mode.");
-COMMAND(interface, add, "<name> type <type> [mesh_id <meshid>] [flags <flag>*]",
+COMMAND(interface, add, "<name> type <type> [mesh_id <meshid>] [4addr on|off] [flags <flag>*]",
 	NL80211_CMD_NEW_INTERFACE, 0, CIB_NETDEV, handle_interface_add, NULL);
 
 static int handle_interface_del(struct nl80211_state *state,
 				struct nl_cb *cb,
 				struct nl_msg *msg,
-				int argc, char **argv)
+				int argc, char **argv,
+				enum id_input id)
 {
 	return 0;
 }
 TOPLEVEL(del, NULL, NL80211_CMD_DEL_INTERFACE, 0, CIB_NETDEV, handle_interface_del,
 	 "Remove this virtual interface");
 HIDDEN(interface, del, NULL, NL80211_CMD_DEL_INTERFACE, 0, CIB_NETDEV, handle_interface_del);
+
+static char *channel_type_name(enum nl80211_channel_type channel_type)
+{
+	switch (channel_type) {
+	case NL80211_CHAN_NO_HT:
+		return "NO HT";
+	case NL80211_CHAN_HT20:
+		return "HT20";
+	case NL80211_CHAN_HT40MINUS:
+		return "HT40-";
+	case NL80211_CHAN_HT40PLUS:
+		return "HT40+";
+	default:
+		return "unknown";
+	}
+}
+
+char *channel_width_name(enum nl80211_chan_width width)
+{
+	switch (width) {
+	case NL80211_CHAN_WIDTH_20_NOHT:
+		return "20 MHz (no HT)";
+	case NL80211_CHAN_WIDTH_20:
+		return "20 MHz";
+	case NL80211_CHAN_WIDTH_40:
+		return "40 MHz";
+	case NL80211_CHAN_WIDTH_80:
+		return "80 MHz";
+	case NL80211_CHAN_WIDTH_80P80:
+		return "80+80 MHz";
+	case NL80211_CHAN_WIDTH_160:
+		return "160 MHz";
+	default:
+		return "unknown";
+	}
+}
 
 static int print_iface_handler(struct nl_msg *msg, void *arg)
 {
@@ -233,10 +302,52 @@ static int print_iface_handler(struct nl_msg *msg, void *arg)
 
 	if (tb_msg[NL80211_ATTR_IFNAME])
 		printf("%sInterface %s\n", indent, nla_get_string(tb_msg[NL80211_ATTR_IFNAME]));
+	else
+		printf("%sUnnamed/non-netdev interface\n", indent);
 	if (tb_msg[NL80211_ATTR_IFINDEX])
 		printf("%s\tifindex %d\n", indent, nla_get_u32(tb_msg[NL80211_ATTR_IFINDEX]));
+	if (tb_msg[NL80211_ATTR_WDEV])
+		printf("%s\twdev 0x%llx\n", indent,
+		       (unsigned long long)nla_get_u64(tb_msg[NL80211_ATTR_WDEV]));
+	if (tb_msg[NL80211_ATTR_MAC]) {
+		char mac_addr[20];
+		mac_addr_n2a(mac_addr, nla_data(tb_msg[NL80211_ATTR_MAC]));
+		printf("%s\taddr %s\n", indent, mac_addr);
+	}
+	if (tb_msg[NL80211_ATTR_SSID]) {
+		printf("%s\tssid ", indent);
+		print_ssid_escaped(nla_len(tb_msg[NL80211_ATTR_SSID]),
+				   nla_data(tb_msg[NL80211_ATTR_SSID]));
+		printf("\n");
+	}
 	if (tb_msg[NL80211_ATTR_IFTYPE])
 		printf("%s\ttype %s\n", indent, iftype_name(nla_get_u32(tb_msg[NL80211_ATTR_IFTYPE])));
+	if (!wiphy && tb_msg[NL80211_ATTR_WIPHY])
+		printf("%s\twiphy %d\n", indent, nla_get_u32(tb_msg[NL80211_ATTR_WIPHY]));
+	if (tb_msg[NL80211_ATTR_WIPHY_FREQ]) {
+		uint32_t freq = nla_get_u32(tb_msg[NL80211_ATTR_WIPHY_FREQ]);
+
+		printf("%s\tchannel %d (%d MHz)", indent,
+		       ieee80211_frequency_to_channel(freq), freq);
+
+		if (tb_msg[NL80211_ATTR_CHANNEL_WIDTH]) {
+			printf(", width: %s",
+				channel_width_name(nla_get_u32(tb_msg[NL80211_ATTR_CHANNEL_WIDTH])));
+			if (tb_msg[NL80211_ATTR_CENTER_FREQ1])
+				printf(", center1: %d MHz",
+					nla_get_u32(tb_msg[NL80211_ATTR_CENTER_FREQ1]));
+			if (tb_msg[NL80211_ATTR_CENTER_FREQ2])
+				printf(", center2: %d MHz",
+					nla_get_u32(tb_msg[NL80211_ATTR_CENTER_FREQ2]));
+		} else if (tb_msg[NL80211_ATTR_WIPHY_CHANNEL_TYPE]) {
+			enum nl80211_channel_type channel_type;
+
+			channel_type = nla_get_u32(tb_msg[NL80211_ATTR_WIPHY_CHANNEL_TYPE]);
+			printf(" %s", channel_type_name(channel_type));
+		}
+
+		printf("\n");
+	}
 
 	return NL_SKIP;
 }
@@ -244,7 +355,8 @@ static int print_iface_handler(struct nl_msg *msg, void *arg)
 static int handle_interface_info(struct nl80211_state *state,
 				 struct nl_cb *cb,
 				 struct nl_msg *msg,
-				 int argc, char **argv)
+				 int argc, char **argv,
+				 enum id_input id)
 {
 	nl_cb_set(cb, NL_CB_VALID, NL_CB_CUSTOM, print_iface_handler, NULL);
 	return 0;
@@ -255,7 +367,8 @@ TOPLEVEL(info, NULL, NL80211_CMD_GET_INTERFACE, 0, CIB_NETDEV, handle_interface_
 static int handle_interface_set(struct nl80211_state *state,
 				struct nl_cb *cb,
 				struct nl_msg *msg,
-				int argc, char **argv)
+				int argc, char **argv,
+				enum id_input id)
 {
 	if (!argc)
 		return 1;
@@ -285,7 +398,8 @@ COMMAND(set, monitor, "<flag>*",
 static int handle_interface_meshid(struct nl80211_state *state,
 				   struct nl_cb *cb,
 				   struct nl_msg *msg,
-				   int argc, char **argv)
+				   int argc, char **argv,
+				   enum id_input id)
 {
 	char *mesh_id = NULL;
 
@@ -308,7 +422,8 @@ static unsigned int dev_dump_wiphy;
 static int handle_dev_dump(struct nl80211_state *state,
 			   struct nl_cb *cb,
 			   struct nl_msg *msg,
-			   int argc, char **argv)
+			   int argc, char **argv,
+			   enum id_input id)
 {
 	dev_dump_wiphy = -1;
 	nl_cb_set(cb, NL_CB_VALID, NL_CB_CUSTOM, print_iface_handler, &dev_dump_wiphy);
@@ -320,7 +435,8 @@ TOPLEVEL(dev, NULL, NL80211_CMD_GET_INTERFACE, NLM_F_DUMP, CIB_NONE, handle_dev_
 static int handle_interface_type(struct nl80211_state *state,
 				 struct nl_cb *cb,
 				 struct nl_msg *msg,
-				 int argc, char **argv)
+				 int argc, char **argv,
+				 enum id_input id)
 {
 	enum nl80211_iftype type;
 	int tpset;
@@ -342,3 +458,106 @@ COMMAND(set, type, "<type>",
 	NL80211_CMD_SET_INTERFACE, 0, CIB_NETDEV, handle_interface_type,
 	"Set interface type/mode.\n"
 	IFACE_TYPES);
+
+static int handle_interface_4addr(struct nl80211_state *state,
+				  struct nl_cb *cb,
+				  struct nl_msg *msg,
+				  int argc, char **argv,
+				  enum id_input id)
+{
+	if (argc != 1)
+		return 1;
+	return parse_4addr_flag(argv[0], msg);
+}
+COMMAND(set, 4addr, "<on|off>",
+	NL80211_CMD_SET_INTERFACE, 0, CIB_NETDEV, handle_interface_4addr,
+	"Set interface 4addr (WDS) mode.");
+
+static int handle_interface_noack_map(struct nl80211_state *state,
+				      struct nl_cb *cb,
+				      struct nl_msg *msg,
+				      int argc, char **argv,
+				      enum id_input id)
+{
+	uint16_t noack_map;
+	char *end;
+
+	if (argc != 1)
+		return 1;
+
+	noack_map = strtoul(argv[0], &end, 16);
+	if (*end)
+		return 1;
+
+	NLA_PUT_U16(msg, NL80211_ATTR_NOACK_MAP, noack_map);
+
+	return 0;
+ nla_put_failure:
+	return -ENOBUFS;
+
+}
+COMMAND(set, noack_map, "<map>",
+	NL80211_CMD_SET_NOACK_MAP, 0, CIB_NETDEV, handle_interface_noack_map,
+	"Set the NoAck map for the TIDs. (0x0009 = BE, 0x0006 = BK, 0x0030 = VI, 0x00C0 = VO)");
+
+
+static int handle_interface_wds_peer(struct nl80211_state *state,
+				     struct nl_cb *cb,
+				     struct nl_msg *msg,
+				     int argc, char **argv,
+				     enum id_input id)
+{
+	unsigned char mac_addr[ETH_ALEN];
+
+	if (argc < 1)
+		return 1;
+
+	if (mac_addr_a2n(mac_addr, argv[0])) {
+		fprintf(stderr, "Invalid MAC address\n");
+		return 2;
+	}
+
+	argc--;
+	argv++;
+
+	if (argc)
+		return 1;
+
+	NLA_PUT(msg, NL80211_ATTR_MAC, ETH_ALEN, mac_addr);
+
+	return 0;
+ nla_put_failure:
+	return -ENOBUFS;
+}
+COMMAND(set, peer, "<MAC address>",
+	NL80211_CMD_SET_WDS_PEER, 0, CIB_NETDEV, handle_interface_wds_peer,
+	"Set interface WDS peer.");
+
+static int set_mcast_rate(struct nl80211_state *state,
+			  struct nl_cb *cb,
+			  struct nl_msg *msg,
+			  int argc, char **argv,
+			  enum id_input id)
+{
+	float rate;
+	char *end;
+
+	if (argc != 1) {
+		printf("Invalid parameters!\n");
+		return 2;
+	}
+
+	rate = strtod(argv[0], &end);
+	if (*end != '\0')
+		return 1;
+
+	NLA_PUT_U32(msg, NL80211_ATTR_MCAST_RATE, (int)(rate * 10));
+
+	return 0;
+nla_put_failure:
+	return -ENOBUFS;
+}
+
+COMMAND(set, mcast_rate, "<rate in Mbps>",
+	NL80211_CMD_SET_MCAST_RATE, 0, CIB_NETDEV, set_mcast_rate,
+	"Set the multicast bitrate.");

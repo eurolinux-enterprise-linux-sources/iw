@@ -1,6 +1,6 @@
 Name:           iw
-Version:        0.9.17
-Release:        4%{?dist}
+Version:        3.10
+Release:        1.1%{?dist}
 Summary:        A nl80211 based wireless configuration tool
 
 Group:          System Environment/Base
@@ -9,12 +9,9 @@ URL:            http://www.linuxwireless.org/en/users/Documentation/iw
 Source0:        http://wireless.kernel.org/download/iw/iw-%{version}.tar.bz2
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 
-BuildRequires: kernel-headers >= 2.6.24 
-BuildRequires: libnl-devel >= 1.0
-BuildRequires: pkgconfig      
-
-Patch0:         iw-default-install-to-PREFIX-sbin.patch
-Patch1:         iw-avoid-section-type-conflict-on-ppc64.patch
+BuildRequires:  kernel-headers >= 2.6.24 
+BuildRequires:  libnl-devel >= 1.0
+BuildRequires:  pkgconfig      
 
 %description
 iw is a new nl80211 based CLI configuration utility for wireless devices.
@@ -24,8 +21,6 @@ only because most new wireless devices being sold are now SoftMAC.
 
 %prep
 %setup -q
-%patch0 -p1
-%patch1 -p1 -R
 
 
 %build
@@ -48,6 +43,9 @@ rm -rf $RPM_BUILD_ROOT
 %doc COPYING
 
 %changelog
+* Fri May 31 2013 John W. Linville <linville@redhat.com> - 3.10-1.1
+- Update to 3.10
+
 * Mon Dec 14 2009 John W. Linville <linville@redhat.com> - 0.9.17-4
 - Correct license tag from BSD to ISC
 

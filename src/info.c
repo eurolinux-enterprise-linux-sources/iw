@@ -21,21 +21,45 @@ static void print_flag(const char *name, int *open)
 	*open = 1;
 }
 
-static void print_mcs_index(unsigned char *mcs)
+static char *cipher_name(__u32 c)
 {
-	unsigned int mcs_bit;
+	static char buf[20];
 
-	for (mcs_bit = 0; mcs_bit <= 76; mcs_bit++) {
-		unsigned int mcs_octet = mcs_bit/8;
-		unsigned int MCS_RATE_BIT = 1 << mcs_bit % 8;
-		bool mcs_rate_idx_set;
+	switch (c) {
+	case 0x000fac01:
+		return "WEP40 (00-0f-ac:1)";
+	case 0x000fac05:
+		return "WEP104 (00-0f-ac:5)";
+	case 0x000fac02:
+		return "TKIP (00-0f-ac:2)";
+	case 0x000fac04:
+		return "CCMP (00-0f-ac:4)";
+	case 0x000fac06:
+		return "CMAC (00-0f-ac:6)";
+	case 0x000fac08:
+		return "GCMP (00-0f-ac:8)";
+	case 0x00147201:
+		return "WPI-SMS4 (00-14-72:1)";
+	default:
+		sprintf(buf, "%.2x-%.2x-%.2x:%d",
+			c >> 24, (c >> 16) & 0xff,
+			(c >> 8) & 0xff, c & 0xff);
 
-		mcs_rate_idx_set = !!(mcs[mcs_octet] & MCS_RATE_BIT);
+		return buf;
+	}
+}
 
-		if (!mcs_rate_idx_set)
-			continue;
-
-		printf("\t\t\tMCS index %d\n", mcs_bit);
+static char *dfs_state_name(enum nl80211_dfs_state state)
+{
+	switch (state) {
+	case NL80211_DFS_USABLE:
+		return "usable";
+	case NL80211_DFS_AVAILABLE:
+		return "available";
+	case NL80211_DFS_UNAVAILABLE:
+		return "unavailable";
+	default:
+		return "unknown";
 	}
 }
 
@@ -66,186 +90,139 @@ static int print_phy_handler(struct nl_msg *msg, void *arg)
 	struct nlattr *nl_freq;
 	struct nlattr *nl_rate;
 	struct nlattr *nl_mode;
-	int bandidx = 1;
-	int rem_band, rem_freq, rem_rate, rem_mode;
+	struct nlattr *nl_cmd;
+	struct nlattr *nl_if, *nl_ftype;
+	int rem_band, rem_freq, rem_rate, rem_mode, rem_cmd, rem_ftype, rem_if;
 	int open;
+	/*
+	 * static variables only work here, other applications need to use the
+	 * callback pointer and store them there so they can be multithreaded
+	 * and/or have multiple netlink sockets, etc.
+	 */
+	static int64_t phy_id = -1;
+	static int last_band = -1;
+	static bool band_had_freq = false;
+	bool print_name = true;
 
 	nla_parse(tb_msg, NL80211_ATTR_MAX, genlmsg_attrdata(gnlh, 0),
 		  genlmsg_attrlen(gnlh, 0), NULL);
 
-	if (!tb_msg[NL80211_ATTR_WIPHY_BANDS])
-		return NL_SKIP;
-
-	if (tb_msg[NL80211_ATTR_WIPHY_NAME])
+	if (tb_msg[NL80211_ATTR_WIPHY]) {
+		if (nla_get_u32(tb_msg[NL80211_ATTR_WIPHY]) == phy_id)
+			print_name = false;
+		else
+			last_band = -1;
+		phy_id = nla_get_u32(tb_msg[NL80211_ATTR_WIPHY]);
+	}
+	if (print_name && tb_msg[NL80211_ATTR_WIPHY_NAME])
 		printf("Wiphy %s\n", nla_get_string(tb_msg[NL80211_ATTR_WIPHY_NAME]));
 
-	nla_for_each_nested(nl_band, tb_msg[NL80211_ATTR_WIPHY_BANDS], rem_band) {
-		printf("\tBand %d:\n", bandidx);
-		bandidx++;
-
-		nla_parse(tb_band, NL80211_BAND_ATTR_MAX, nla_data(nl_band),
-			  nla_len(nl_band), NULL);
-
-#ifdef NL80211_BAND_ATTR_HT_CAPA
-		if (tb_band[NL80211_BAND_ATTR_HT_CAPA]) {
-			unsigned short cap = nla_get_u16(tb_band[NL80211_BAND_ATTR_HT_CAPA]);
-#define PCOM(fmt, args...) do { printf("\t\t\t* " fmt "\n", ##args); } while (0)
-#define PBCOM(bit, args...) if (cap & (bit)) PCOM(args)
-			printf("\t\tHT capabilities: 0x%.4x\n", cap);
-			PBCOM(0x0001, "LPDC coding");
-			if (cap & 0x0002)
-				PCOM("20/40 MHz operation");
-			else
-				PCOM("20 MHz operation");
-			switch ((cap & 0x000c) >> 2) {
-			case 0:
-				PCOM("static SM PS");
-				break;
-			case 1:
-				PCOM("dynamic SM PS");
-				break;
-			case 2:
-				PCOM("reserved SM PS");
-				break;
-			case 3:
-				PCOM("SM PS disabled");
-				break;
+	/* needed for split dump */
+	if (tb_msg[NL80211_ATTR_WIPHY_BANDS]) {
+		nla_for_each_nested(nl_band, tb_msg[NL80211_ATTR_WIPHY_BANDS], rem_band) {
+			if (last_band != nl_band->nla_type) {
+				printf("\tBand %d:\n", nl_band->nla_type + 1);
+				band_had_freq = false;
 			}
-			PBCOM(0x0010, "HT-greenfield");
-			PBCOM(0x0020, "20 MHz short GI");
-			PBCOM(0x0040, "40 MHz short GI");
-			PBCOM(0x0080, "TX STBC");
-			if (cap & 0x300)
-				PCOM("RX STBC %d streams", (cap & 0x0300) >> 8);
-			PBCOM(0x0400, "HT-delayed block-ack");
-			PCOM("max A-MSDU len %d", 0xeff + ((cap & 0x0800) << 1));
-			PBCOM(0x1000, "DSSS/CCK 40 MHz");
-			PBCOM(0x2000, "PSMP support");
-			PBCOM(0x4000, "40 MHz intolerant");
-			PBCOM(0x8000, "L-SIG TXOP protection support");
-		}
-		if (tb_band[NL80211_BAND_ATTR_HT_AMPDU_FACTOR]) {
-			unsigned char factor = nla_get_u8(tb_band[NL80211_BAND_ATTR_HT_AMPDU_FACTOR]);
-			printf("\t\tHT A-MPDU factor: 0x%.4x (%d bytes)\n", factor, (1<<(13+factor))-1);
-		}
-		if (tb_band[NL80211_BAND_ATTR_HT_AMPDU_DENSITY]) {
-			unsigned char dens = nla_get_u8(tb_band[NL80211_BAND_ATTR_HT_AMPDU_DENSITY]);
-			printf("\t\tHT A-MPDU density: 0x%.4x (", dens);
-			switch (dens) {
-			case 0:
-				printf("no restriction)\n");
-				break;
-			case 1:
-				printf("1/4 usec)\n");
-				break;
-			case 2:
-				printf("1/2 usec)\n");
-				break;
-			default:
-				printf("%d usec)\n", 1<<(dens - 3));
+			last_band = nl_band->nla_type;
+
+			nla_parse(tb_band, NL80211_BAND_ATTR_MAX, nla_data(nl_band),
+				  nla_len(nl_band), NULL);
+
+			if (tb_band[NL80211_BAND_ATTR_HT_CAPA]) {
+				__u16 cap = nla_get_u16(tb_band[NL80211_BAND_ATTR_HT_CAPA]);
+				print_ht_capability(cap);
 			}
-		}
-		if (tb_band[NL80211_BAND_ATTR_HT_MCS_SET] &&
-		    nla_len(tb_band[NL80211_BAND_ATTR_HT_MCS_SET]) == 16) {
-			/* As defined in 7.3.2.57.4 Supported MCS Set field */
-			unsigned int tx_max_num_spatial_streams, max_rx_supp_data_rate;
-			unsigned char *mcs = nla_data(tb_band[NL80211_BAND_ATTR_HT_MCS_SET]);
-			bool tx_mcs_set_defined, tx_mcs_set_equal, tx_unequal_modulation;
+			if (tb_band[NL80211_BAND_ATTR_HT_AMPDU_FACTOR]) {
+				__u8 exponent = nla_get_u8(tb_band[NL80211_BAND_ATTR_HT_AMPDU_FACTOR]);
+				print_ampdu_length(exponent);
+			}
+			if (tb_band[NL80211_BAND_ATTR_HT_AMPDU_DENSITY]) {
+				__u8 spacing = nla_get_u8(tb_band[NL80211_BAND_ATTR_HT_AMPDU_DENSITY]);
+				print_ampdu_spacing(spacing);
+			}
+			if (tb_band[NL80211_BAND_ATTR_HT_MCS_SET] &&
+			    nla_len(tb_band[NL80211_BAND_ATTR_HT_MCS_SET]) == 16)
+				print_ht_mcs(nla_data(tb_band[NL80211_BAND_ATTR_HT_MCS_SET]));
+			if (tb_band[NL80211_BAND_ATTR_VHT_CAPA] &&
+			    tb_band[NL80211_BAND_ATTR_VHT_MCS_SET])
+				print_vht_info(nla_get_u32(tb_band[NL80211_BAND_ATTR_VHT_CAPA]),
+					       nla_data(tb_band[NL80211_BAND_ATTR_VHT_MCS_SET]));
 
-			printf("\t\tHT MCS set: %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x\n",
-				mcs[0], mcs[1], mcs[2], mcs[3], mcs[4], mcs[5], mcs[6], mcs[7],
-				mcs[8], mcs[9], mcs[10], mcs[11], mcs[12], mcs[13], mcs[14], mcs[15]);
+			if (tb_band[NL80211_BAND_ATTR_FREQS]) {
+				if (!band_had_freq) {
+					printf("\t\tFrequencies:\n");
+					band_had_freq = true;
+				}
+				nla_for_each_nested(nl_freq, tb_band[NL80211_BAND_ATTR_FREQS], rem_freq) {
+					uint32_t freq;
+					nla_parse(tb_freq, NL80211_FREQUENCY_ATTR_MAX, nla_data(nl_freq),
+						  nla_len(nl_freq), freq_policy);
+					if (!tb_freq[NL80211_FREQUENCY_ATTR_FREQ])
+						continue;
+					freq = nla_get_u32(tb_freq[NL80211_FREQUENCY_ATTR_FREQ]);
+					printf("\t\t\t* %d MHz [%d]", freq, ieee80211_frequency_to_channel(freq));
 
-			max_rx_supp_data_rate = ((mcs[10] >> 8) & ((mcs[11] & 0x3) << 8));
-			tx_mcs_set_defined = !!(mcs[12] & (1 << 0));
-			tx_mcs_set_equal = !(mcs[12] & (1 << 1));
-			tx_max_num_spatial_streams = (mcs[12] & ((1 << 2) | (1 << 3))) + 1;
-			tx_unequal_modulation = !!(mcs[12] & (1 << 4));
+					if (tb_freq[NL80211_FREQUENCY_ATTR_MAX_TX_POWER] &&
+					    !tb_freq[NL80211_FREQUENCY_ATTR_DISABLED])
+						printf(" (%.1f dBm)", 0.01 * nla_get_u32(tb_freq[NL80211_FREQUENCY_ATTR_MAX_TX_POWER]));
 
-			if (max_rx_supp_data_rate)
-				printf("\t\tHT Max RX data rate: %d Mbps\n", max_rx_supp_data_rate);
-			/* XXX: else see 9.6.0e.5.3 how to get this I think */
+					open = 0;
+					if (tb_freq[NL80211_FREQUENCY_ATTR_DISABLED]) {
+						print_flag("disabled", &open);
+						goto next;
+					}
+					if (tb_freq[NL80211_FREQUENCY_ATTR_PASSIVE_SCAN])
+						print_flag("passive scanning", &open);
+					if (tb_freq[NL80211_FREQUENCY_ATTR_NO_IBSS])
+						print_flag("no IBSS", &open);
+					if (tb_freq[NL80211_FREQUENCY_ATTR_RADAR])
+						print_flag("radar detection", &open);
+next:
+					if (open)
+						printf(")");
+					printf("\n");
 
-			if (tx_mcs_set_defined) {
-				if (tx_mcs_set_equal) {
-					printf("\t\tHT TX/RX MCS rate indexes supported:\n");
-					print_mcs_index(&mcs[0]);
-				} else {
-					printf("\t\tHT RX MCS rate indexes supported:\n");
-					print_mcs_index(&mcs[0]);
+					if (!tb_freq[NL80211_FREQUENCY_ATTR_DISABLED] && tb_freq[NL80211_FREQUENCY_ATTR_DFS_STATE]) {
+						enum nl80211_dfs_state state = nla_get_u32(tb_freq[NL80211_FREQUENCY_ATTR_DFS_STATE]);
+						unsigned long time;
 
-					if (tx_unequal_modulation)
-						printf("TX unequal modulation supported\n");
-					else
-						printf("TX unequal modulation not supported\n");
+						printf("\t\t\t  DFS state: %s", dfs_state_name(state));
+						if (tb_freq[NL80211_FREQUENCY_ATTR_DFS_TIME]) {
+							time = nla_get_u32(tb_freq[NL80211_FREQUENCY_ATTR_DFS_TIME]);
+							printf(" (for %lu sec)", time/1000);
+						}
+						printf("\n");
+					}
 
-					printf("\t\tHT TX Max spatiel streams: %d\n",
-						tx_max_num_spatial_streams);
-
-					printf("\t\tHT TX MCS rate indexes supported may differ\n");
 				}
 			}
-			else {
-				printf("\t\tHT RX MCS rate indexes supported:\n");
-				print_mcs_index(&mcs[0]);
-				printf("\t\tHT TX MCS rates indexes are undefined\n");
+
+			if (tb_band[NL80211_BAND_ATTR_RATES]) {
+			printf("\t\tBitrates (non-HT):\n");
+			nla_for_each_nested(nl_rate, tb_band[NL80211_BAND_ATTR_RATES], rem_rate) {
+				nla_parse(tb_rate, NL80211_BITRATE_ATTR_MAX, nla_data(nl_rate),
+					  nla_len(nl_rate), rate_policy);
+				if (!tb_rate[NL80211_BITRATE_ATTR_RATE])
+					continue;
+				printf("\t\t\t* %2.1f Mbps", 0.1 * nla_get_u32(tb_rate[NL80211_BITRATE_ATTR_RATE]));
+				open = 0;
+				if (tb_rate[NL80211_BITRATE_ATTR_2GHZ_SHORTPREAMBLE])
+					print_flag("short preamble supported", &open);
+				if (open)
+					printf(")");
+				printf("\n");
 			}
-
-		}
-#endif
-
-		printf("\t\tFrequencies:\n");
-
-		nla_for_each_nested(nl_freq, tb_band[NL80211_BAND_ATTR_FREQS], rem_freq) {
-			uint32_t freq;
-			nla_parse(tb_freq, NL80211_FREQUENCY_ATTR_MAX, nla_data(nl_freq),
-				  nla_len(nl_freq), freq_policy);
-			if (!tb_freq[NL80211_FREQUENCY_ATTR_FREQ])
-				continue;
-			freq = nla_get_u32(tb_freq[NL80211_FREQUENCY_ATTR_FREQ]);
-			printf("\t\t\t* %d MHz [%d]", freq, ieee80211_frequency_to_channel(freq));
-
-			if (tb_freq[NL80211_FREQUENCY_ATTR_MAX_TX_POWER] &&
-			    !tb_freq[NL80211_FREQUENCY_ATTR_DISABLED])
-				printf(" (%.1f dBm)", 0.01 * nla_get_u32(tb_freq[NL80211_FREQUENCY_ATTR_MAX_TX_POWER]));
-
-			open = 0;
-			if (tb_freq[NL80211_FREQUENCY_ATTR_DISABLED]) {
-				print_flag("disabled", &open);
-				goto next;
 			}
-			if (tb_freq[NL80211_FREQUENCY_ATTR_PASSIVE_SCAN])
-				print_flag("passive scanning", &open);
-			if (tb_freq[NL80211_FREQUENCY_ATTR_NO_IBSS])
-				print_flag("no IBSS", &open);
-			if (tb_freq[NL80211_FREQUENCY_ATTR_RADAR])
-				print_flag("radar detection", &open);
- next:
-			if (open)
-				printf(")");
-			printf("\n");
-		}
-
-		printf("\t\tBitrates (non-HT):\n");
-
-		nla_for_each_nested(nl_rate, tb_band[NL80211_BAND_ATTR_RATES], rem_rate) {
-			nla_parse(tb_rate, NL80211_BITRATE_ATTR_MAX, nla_data(nl_rate),
-				  nla_len(nl_rate), rate_policy);
-			if (!tb_rate[NL80211_BITRATE_ATTR_RATE])
-				continue;
-			printf("\t\t\t* %2.1f Mbps", 0.1 * nla_get_u32(tb_rate[NL80211_BITRATE_ATTR_RATE]));
-			open = 0;
-			if (tb_rate[NL80211_BITRATE_ATTR_2GHZ_SHORTPREAMBLE])
-				print_flag("short preamble supported", &open);
-			if (open)
-				printf(")");
-			printf("\n");
 		}
 	}
 
 	if (tb_msg[NL80211_ATTR_MAX_NUM_SCAN_SSIDS])
 		printf("\tmax # scan SSIDs: %d\n",
 		       nla_get_u8(tb_msg[NL80211_ATTR_MAX_NUM_SCAN_SSIDS]));
+	if (tb_msg[NL80211_ATTR_MAX_SCAN_IE_LEN])
+		printf("\tmax scan IEs length: %d bytes\n",
+		       nla_get_u16(tb_msg[NL80211_ATTR_MAX_SCAN_IE_LEN]));
 
 	if (tb_msg[NL80211_ATTR_WIPHY_FRAG_THRESHOLD]) {
 		unsigned int frag;
@@ -263,27 +240,368 @@ static int print_phy_handler(struct nl_msg *msg, void *arg)
 			printf("\tRTS threshold: %d\n", rts);
 	}
 
-	if (!tb_msg[NL80211_ATTR_SUPPORTED_IFTYPES])
-		return NL_SKIP;
+	if (tb_msg[NL80211_ATTR_WIPHY_COVERAGE_CLASS]) {
+		unsigned char coverage;
 
-	printf("\tSupported interface modes:\n");
-	nla_for_each_nested(nl_mode, tb_msg[NL80211_ATTR_SUPPORTED_IFTYPES], rem_mode)
-		printf("\t\t * %s\n", iftype_name(nl_mode->nla_type));
+		coverage = nla_get_u8(tb_msg[NL80211_ATTR_WIPHY_COVERAGE_CLASS]);
+		/* See handle_distance() for an explanation where the '450' comes from */
+		printf("\tCoverage class: %d (up to %dm)\n", coverage, 450 * coverage);
+	}
+
+	if (tb_msg[NL80211_ATTR_CIPHER_SUITES]) {
+		int num = nla_len(tb_msg[NL80211_ATTR_CIPHER_SUITES]) / sizeof(__u32);
+		int i;
+		__u32 *ciphers = nla_data(tb_msg[NL80211_ATTR_CIPHER_SUITES]);
+		if (num > 0) {
+			printf("\tSupported Ciphers:\n");
+			for (i = 0; i < num; i++)
+				printf("\t\t* %s\n",
+					cipher_name(ciphers[i]));
+		}
+	}
+
+	if (tb_msg[NL80211_ATTR_WIPHY_ANTENNA_AVAIL_TX] &&
+	    tb_msg[NL80211_ATTR_WIPHY_ANTENNA_AVAIL_RX])
+		printf("\tAvailable Antennas: TX %#x RX %#x\n",
+		       nla_get_u32(tb_msg[NL80211_ATTR_WIPHY_ANTENNA_AVAIL_TX]),
+		       nla_get_u32(tb_msg[NL80211_ATTR_WIPHY_ANTENNA_AVAIL_RX]));
+
+	if (tb_msg[NL80211_ATTR_WIPHY_ANTENNA_TX] &&
+	    tb_msg[NL80211_ATTR_WIPHY_ANTENNA_RX])
+		printf("\tConfigured Antennas: TX %#x RX %#x\n",
+		       nla_get_u32(tb_msg[NL80211_ATTR_WIPHY_ANTENNA_TX]),
+		       nla_get_u32(tb_msg[NL80211_ATTR_WIPHY_ANTENNA_RX]));
+
+	if (tb_msg[NL80211_ATTR_SUPPORTED_IFTYPES]) {
+		printf("\tSupported interface modes:\n");
+		nla_for_each_nested(nl_mode, tb_msg[NL80211_ATTR_SUPPORTED_IFTYPES], rem_mode)
+			printf("\t\t * %s\n", iftype_name(nla_type(nl_mode)));
+	}
+
+	if (tb_msg[NL80211_ATTR_SOFTWARE_IFTYPES]) {
+		printf("\tsoftware interface modes (can always be added):\n");
+		nla_for_each_nested(nl_mode, tb_msg[NL80211_ATTR_SOFTWARE_IFTYPES], rem_mode)
+			printf("\t\t * %s\n", iftype_name(nla_type(nl_mode)));
+	}
+
+	if (tb_msg[NL80211_ATTR_INTERFACE_COMBINATIONS]) {
+		struct nlattr *nl_combi;
+		int rem_combi;
+		bool have_combinations = false;
+
+		nla_for_each_nested(nl_combi, tb_msg[NL80211_ATTR_INTERFACE_COMBINATIONS], rem_combi) {
+			static struct nla_policy iface_combination_policy[NUM_NL80211_IFACE_COMB] = {
+				[NL80211_IFACE_COMB_LIMITS] = { .type = NLA_NESTED },
+				[NL80211_IFACE_COMB_MAXNUM] = { .type = NLA_U32 },
+				[NL80211_IFACE_COMB_STA_AP_BI_MATCH] = { .type = NLA_FLAG },
+				[NL80211_IFACE_COMB_NUM_CHANNELS] = { .type = NLA_U32 },
+				[NL80211_IFACE_COMB_RADAR_DETECT_WIDTHS] = { .type = NLA_U32 },
+			};
+			struct nlattr *tb_comb[NUM_NL80211_IFACE_COMB];
+			static struct nla_policy iface_limit_policy[NUM_NL80211_IFACE_LIMIT] = {
+				[NL80211_IFACE_LIMIT_TYPES] = { .type = NLA_NESTED },
+				[NL80211_IFACE_LIMIT_MAX] = { .type = NLA_U32 },
+			};
+			struct nlattr *tb_limit[NUM_NL80211_IFACE_LIMIT];
+			struct nlattr *nl_limit;
+			int err, rem_limit;
+			bool comma = false;
+
+			if (!have_combinations) {
+				printf("\tvalid interface combinations:\n");
+				have_combinations = true;
+			}
+
+			printf("\t\t * ");
+
+			err = nla_parse_nested(tb_comb, MAX_NL80211_IFACE_COMB,
+					       nl_combi, iface_combination_policy);
+			if (err || !tb_comb[NL80211_IFACE_COMB_LIMITS] ||
+			    !tb_comb[NL80211_IFACE_COMB_MAXNUM] ||
+			    !tb_comb[NL80211_IFACE_COMB_NUM_CHANNELS]) {
+				printf(" <failed to parse>\n");
+				goto broken_combination;
+			}
+
+			nla_for_each_nested(nl_limit, tb_comb[NL80211_IFACE_COMB_LIMITS], rem_limit) {
+				bool ift_comma = false;
+
+				err = nla_parse_nested(tb_limit, MAX_NL80211_IFACE_LIMIT,
+						       nl_limit, iface_limit_policy);
+				if (err || !tb_limit[NL80211_IFACE_LIMIT_TYPES]) {
+					printf("<failed to parse>\n");
+					goto broken_combination;
+				}
+
+				if (comma)
+					printf(", ");
+				comma = true;
+				printf("#{");
+
+				nla_for_each_nested(nl_mode, tb_limit[NL80211_IFACE_LIMIT_TYPES], rem_mode) {
+					printf("%s %s", ift_comma ? "," : "",
+						iftype_name(nla_type(nl_mode)));
+					ift_comma = true;
+				}
+				printf(" } <= %u", nla_get_u32(tb_limit[NL80211_IFACE_LIMIT_MAX]));
+			}
+			printf(",\n\t\t   ");
+
+			printf("total <= %d, #channels <= %d%s",
+				nla_get_u32(tb_comb[NL80211_IFACE_COMB_MAXNUM]),
+				nla_get_u32(tb_comb[NL80211_IFACE_COMB_NUM_CHANNELS]),
+				tb_comb[NL80211_IFACE_COMB_STA_AP_BI_MATCH] ?
+					", STA/AP BI must match" : "");
+			if (tb_comb[NL80211_IFACE_COMB_RADAR_DETECT_WIDTHS]) {
+				unsigned long widths = nla_get_u32(tb_comb[NL80211_IFACE_COMB_RADAR_DETECT_WIDTHS]);
+
+				if (widths) {
+					int width;
+					bool first = true;
+
+					printf(", radar detect widths: {");
+					for (width = 0; width < 32; width++)
+						if (widths & (1 << width)) {
+							printf("%s %s",
+							       first ? "":",",
+							       channel_width_name(width));
+							first = false;
+						}
+					printf(" }\n");
+				}
+			}
+			printf("\n");
+broken_combination:
+			;
+		}
+
+		if (!have_combinations)
+			printf("\tinterface combinations are not supported\n");
+	}
+
+	if (tb_msg[NL80211_ATTR_SUPPORTED_COMMANDS]) {
+		printf("\tSupported commands:\n");
+		nla_for_each_nested(nl_cmd, tb_msg[NL80211_ATTR_SUPPORTED_COMMANDS], rem_cmd)
+			printf("\t\t * %s\n", command_name(nla_get_u32(nl_cmd)));
+	}
+
+	if (tb_msg[NL80211_ATTR_TX_FRAME_TYPES]) {
+		printf("\tSupported TX frame types:\n");
+		nla_for_each_nested(nl_if, tb_msg[NL80211_ATTR_TX_FRAME_TYPES], rem_if) {
+			bool printed = false;
+			nla_for_each_nested(nl_ftype, nl_if, rem_ftype) {
+				if (!printed)
+					printf("\t\t * %s:", iftype_name(nla_type(nl_if)));
+				printed = true;
+				printf(" 0x%.2x", nla_get_u16(nl_ftype));
+			}
+			if (printed)
+				printf("\n");
+		}
+	}
+
+	if (tb_msg[NL80211_ATTR_RX_FRAME_TYPES]) {
+		printf("\tSupported RX frame types:\n");
+		nla_for_each_nested(nl_if, tb_msg[NL80211_ATTR_RX_FRAME_TYPES], rem_if) {
+			bool printed = false;
+			nla_for_each_nested(nl_ftype, nl_if, rem_ftype) {
+				if (!printed)
+					printf("\t\t * %s:", iftype_name(nla_type(nl_if)));
+				printed = true;
+				printf(" 0x%.2x", nla_get_u16(nl_ftype));
+			}
+			if (printed)
+				printf("\n");
+		}
+	}
+
+	if (tb_msg[NL80211_ATTR_SUPPORT_IBSS_RSN])
+		printf("\tDevice supports RSN-IBSS.\n");
+
+	if (tb_msg[NL80211_ATTR_WOWLAN_TRIGGERS_SUPPORTED]) {
+		struct nlattr *tb_wowlan[NUM_NL80211_WOWLAN_TRIG];
+		static struct nla_policy wowlan_policy[NUM_NL80211_WOWLAN_TRIG] = {
+			[NL80211_WOWLAN_TRIG_ANY] = { .type = NLA_FLAG },
+			[NL80211_WOWLAN_TRIG_DISCONNECT] = { .type = NLA_FLAG },
+			[NL80211_WOWLAN_TRIG_MAGIC_PKT] = { .type = NLA_FLAG },
+			[NL80211_WOWLAN_TRIG_PKT_PATTERN] = { .minlen = 12 },
+			[NL80211_WOWLAN_TRIG_GTK_REKEY_SUPPORTED] = { .type = NLA_FLAG },
+			[NL80211_WOWLAN_TRIG_GTK_REKEY_FAILURE] = { .type = NLA_FLAG },
+			[NL80211_WOWLAN_TRIG_EAP_IDENT_REQUEST] = { .type = NLA_FLAG },
+			[NL80211_WOWLAN_TRIG_4WAY_HANDSHAKE] = { .type = NLA_FLAG },
+			[NL80211_WOWLAN_TRIG_RFKILL_RELEASE] = { .type = NLA_FLAG },
+			[NL80211_WOWLAN_TRIG_TCP_CONNECTION] = { .type = NLA_NESTED },
+		};
+		struct nl80211_wowlan_pattern_support *pat;
+		int err;
+
+		err = nla_parse_nested(tb_wowlan, MAX_NL80211_WOWLAN_TRIG,
+				       tb_msg[NL80211_ATTR_WOWLAN_TRIGGERS_SUPPORTED],
+				       wowlan_policy);
+		printf("\tWoWLAN support:");
+		if (err) {
+			printf(" <failed to parse>\n");
+		} else {
+			printf("\n");
+			if (tb_wowlan[NL80211_WOWLAN_TRIG_ANY])
+				printf("\t\t * wake up on anything (device continues operating normally)\n");
+			if (tb_wowlan[NL80211_WOWLAN_TRIG_DISCONNECT])
+				printf("\t\t * wake up on disconnect\n");
+			if (tb_wowlan[NL80211_WOWLAN_TRIG_MAGIC_PKT])
+				printf("\t\t * wake up on magic packet\n");
+			if (tb_wowlan[NL80211_WOWLAN_TRIG_PKT_PATTERN]) {
+				pat = nla_data(tb_wowlan[NL80211_WOWLAN_TRIG_PKT_PATTERN]);
+				printf("\t\t * wake up on pattern match, up to %u patterns of %u-%u bytes,\n"
+					"\t\t   maximum packet offset %u bytes\n",
+					pat->max_patterns, pat->min_pattern_len, pat->max_pattern_len,
+					(nla_len(tb_wowlan[NL80211_WOWLAN_TRIG_PKT_PATTERN]) <
+					sizeof(*pat)) ? 0 : pat->max_pkt_offset);
+			}
+			if (tb_wowlan[NL80211_WOWLAN_TRIG_GTK_REKEY_SUPPORTED])
+				printf("\t\t * can do GTK rekeying\n");
+			if (tb_wowlan[NL80211_WOWLAN_TRIG_GTK_REKEY_FAILURE])
+				printf("\t\t * wake up on GTK rekey failure\n");
+			if (tb_wowlan[NL80211_WOWLAN_TRIG_EAP_IDENT_REQUEST])
+				printf("\t\t * wake up on EAP identity request\n");
+			if (tb_wowlan[NL80211_WOWLAN_TRIG_4WAY_HANDSHAKE])
+				printf("\t\t * wake up on 4-way handshake\n");
+			if (tb_wowlan[NL80211_WOWLAN_TRIG_RFKILL_RELEASE])
+				printf("\t\t * wake up on rfkill release\n");
+			if (tb_wowlan[NL80211_WOWLAN_TRIG_TCP_CONNECTION])
+				printf("\t\t * wake up on TCP connection\n");
+		}
+	}
+
+	if (tb_msg[NL80211_ATTR_ROAM_SUPPORT])
+		printf("\tDevice supports roaming.\n");
+
+	if (tb_msg[NL80211_ATTR_SUPPORT_AP_UAPSD])
+		printf("\tDevice supports AP-side u-APSD.\n");
+
+	if (tb_msg[NL80211_ATTR_HT_CAPABILITY_MASK]) {
+		struct ieee80211_ht_cap *cm;
+		printf("\tHT Capability overrides:\n");
+		if (nla_len(tb_msg[NL80211_ATTR_HT_CAPABILITY_MASK]) >= sizeof(*cm)) {
+			cm = nla_data(tb_msg[NL80211_ATTR_HT_CAPABILITY_MASK]);
+			printf("\t\t * MCS: %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx"
+			       " %02hhx %02hhx %02hhx %02hhx\n",
+			       cm->mcs.rx_mask[0], cm->mcs.rx_mask[1],
+			       cm->mcs.rx_mask[2], cm->mcs.rx_mask[3],
+			       cm->mcs.rx_mask[4], cm->mcs.rx_mask[5],
+			       cm->mcs.rx_mask[6], cm->mcs.rx_mask[7],
+			       cm->mcs.rx_mask[8], cm->mcs.rx_mask[9]);
+			if (cm->cap_info & htole16(IEEE80211_HT_CAP_MAX_AMSDU))
+				printf("\t\t * maximum A-MSDU length\n");
+			if (cm->cap_info & htole16(IEEE80211_HT_CAP_SUP_WIDTH_20_40))
+				printf("\t\t * supported channel width\n");
+			if (cm->cap_info & htole16(IEEE80211_HT_CAP_SGI_40))
+				printf("\t\t * short GI for 40 MHz\n");
+			if (cm->ampdu_params_info & IEEE80211_HT_AMPDU_PARM_FACTOR)
+				printf("\t\t * max A-MPDU length exponent\n");
+			if (cm->ampdu_params_info & IEEE80211_HT_AMPDU_PARM_DENSITY)
+				printf("\t\t * min MPDU start spacing\n");
+		} else {
+			printf("\tERROR: capabilities mask is too short, expected: %d, received: %d\n",
+			       (int)(sizeof(*cm)),
+			       (int)(nla_len(tb_msg[NL80211_ATTR_HT_CAPABILITY_MASK])));
+		}
+	}
+
+	if (tb_msg[NL80211_ATTR_FEATURE_FLAGS]) {
+		unsigned int features = nla_get_u32(tb_msg[NL80211_ATTR_FEATURE_FLAGS]);
+
+		if (features & NL80211_FEATURE_SK_TX_STATUS)
+			printf("\tDevice supports TX status socket option.\n");
+		if (features & NL80211_FEATURE_HT_IBSS)
+			printf("\tDevice supports HT-IBSS.\n");
+		if (features & NL80211_FEATURE_INACTIVITY_TIMER)
+			printf("\tDevice has client inactivity timer.\n");
+		if (features & NL80211_FEATURE_CELL_BASE_REG_HINTS)
+			printf("\tDevice accepts cell base station regulatory hints.\n");
+		if (features & NL80211_FEATURE_P2P_DEVICE_NEEDS_CHANNEL)
+			printf("\tP2P Device uses a channel (of the concurrent ones)\n");
+		if (features & NL80211_FEATURE_LOW_PRIORITY_SCAN)
+			printf("\tDevice supports low priority scan.\n");
+		if (features & NL80211_FEATURE_SCAN_FLUSH)
+			printf("\tDevice supports scan flush.\n");
+		if (features & NL80211_FEATURE_AP_SCAN)
+			printf("\tDevice supports AP scan.\n");
+	}
 
 	return NL_SKIP;
 }
 
+static bool nl80211_has_split_wiphy = false;
+
 static int handle_info(struct nl80211_state *state,
 		       struct nl_cb *cb,
 		       struct nl_msg *msg,
-		       int argc, char **argv)
+		       int argc, char **argv,
+		       enum id_input id)
 {
+	char *feat_args[] = { "features", "-q" };
+	int err;
+
+	err = handle_cmd(state, CIB_NONE, 2, feat_args);
+	if (!err && nl80211_has_split_wiphy) {
+		nla_put_flag(msg, NL80211_ATTR_SPLIT_WIPHY_DUMP);
+		nlmsg_hdr(msg)->nlmsg_flags |= NLM_F_DUMP;
+	}
+
 	nl_cb_set(cb, NL_CB_VALID, NL_CB_CUSTOM, print_phy_handler, NULL);
 
 	return 0;
 }
 __COMMAND(NULL, info, "info", NULL, NL80211_CMD_GET_WIPHY, 0, 0, CIB_PHY, handle_info,
-	 "Show capabilities for the specified wireless device.");
+	 "Show capabilities for the specified wireless device.", NULL);
 TOPLEVEL(list, NULL, NL80211_CMD_GET_WIPHY, NLM_F_DUMP, CIB_NONE, handle_info,
 	 "List all wireless devices and their capabilities.");
 TOPLEVEL(phy, NULL, NL80211_CMD_GET_WIPHY, NLM_F_DUMP, CIB_NONE, handle_info, NULL);
+
+static int handle_commands(struct nl80211_state *state,
+			   struct nl_cb *cb, struct nl_msg *msg,
+			   int argc, char **argv, enum id_input id)
+{
+	int i;
+	for (i = 1; i < NL80211_CMD_MAX; i++)
+		printf("%d (0x%x): %s\n", i, i, command_name(i));
+	/* don't send netlink messages */
+	return 2;
+}
+TOPLEVEL(commands, NULL, NL80211_CMD_GET_WIPHY, 0, CIB_NONE, handle_commands,
+	 "list all known commands and their decimal & hex value");
+
+static int print_feature_handler(struct nl_msg *msg, void *arg)
+{
+	struct nlattr *tb_msg[NL80211_ATTR_MAX + 1];
+	struct genlmsghdr *gnlh = nlmsg_data(nlmsg_hdr(msg));
+	bool print = (unsigned long)arg;
+#define maybe_printf(...) do { if (print) printf(__VA_ARGS__); } while (0)
+
+	nla_parse(tb_msg, NL80211_ATTR_MAX, genlmsg_attrdata(gnlh, 0),
+		  genlmsg_attrlen(gnlh, 0), NULL);
+
+	if (tb_msg[NL80211_ATTR_PROTOCOL_FEATURES]) {
+		uint32_t feat = nla_get_u32(tb_msg[NL80211_ATTR_PROTOCOL_FEATURES]);
+
+		maybe_printf("nl80211 features: 0x%x\n", feat);
+		if (feat & NL80211_PROTOCOL_FEATURE_SPLIT_WIPHY_DUMP) {
+			maybe_printf("\t* split wiphy dump\n");
+			nl80211_has_split_wiphy = true;
+		}
+	}
+
+	return NL_SKIP;
+}
+
+static int handle_features(struct nl80211_state *state,
+			   struct nl_cb *cb, struct nl_msg *msg,
+			   int argc, char **argv, enum id_input id)
+{
+	unsigned long print = argc == 0 || strcmp(argv[0], "-q");
+	nl_cb_set(cb, NL_CB_VALID, NL_CB_CUSTOM, print_feature_handler, (void *)print);
+	return 0;
+}
+
+TOPLEVEL(features, "", NL80211_CMD_GET_PROTOCOL_FEATURES, 0, CIB_NONE,
+	 handle_features, "");

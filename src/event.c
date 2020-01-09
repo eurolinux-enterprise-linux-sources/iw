@@ -100,14 +100,168 @@ static void print_frame(struct print_event_args *args, struct nlattr *attr)
 	printf("]");
 }
 
+static void parse_cqm_event(struct nlattr **attrs)
+{
+	static struct nla_policy cqm_policy[NL80211_ATTR_CQM_MAX + 1] = {
+		[NL80211_ATTR_CQM_RSSI_THOLD] = { .type = NLA_U32 },
+		[NL80211_ATTR_CQM_RSSI_HYST] = { .type = NLA_U32 },
+		[NL80211_ATTR_CQM_RSSI_THRESHOLD_EVENT] = { .type = NLA_U32 },
+	};
+	struct nlattr *cqm[NL80211_ATTR_CQM_MAX + 1];
+	struct nlattr *cqm_attr = attrs[NL80211_ATTR_CQM];
+
+	printf("CQM event: ");
+
+	if (!cqm_attr ||
+	    nla_parse_nested(cqm, NL80211_ATTR_CQM_MAX, cqm_attr, cqm_policy)) {
+		printf("missing data!\n");
+		return;
+	}
+
+	if (cqm[NL80211_ATTR_CQM_RSSI_THRESHOLD_EVENT]) {
+		enum nl80211_cqm_rssi_threshold_event rssi_event;
+		bool found_one = false;
+
+		rssi_event = nla_get_u32(cqm[NL80211_ATTR_CQM_RSSI_THRESHOLD_EVENT]);
+
+		switch (rssi_event) {
+		case NL80211_CQM_RSSI_THRESHOLD_EVENT_HIGH:
+			printf("RSSI went above threshold\n");
+			found_one = true;
+			break;
+		case NL80211_CQM_RSSI_THRESHOLD_EVENT_LOW:
+			printf("RSSI went below threshold\n");
+			found_one = true;
+			break;
+		case NL80211_CQM_RSSI_BEACON_LOSS_EVENT:
+			printf("Beacon loss detected\n");
+			found_one = true;
+			break;
+		}
+
+		if (!found_one)
+			printf("Unknown event type: %i\n", rssi_event);
+	} else if (cqm[NL80211_ATTR_CQM_PKT_LOSS_EVENT] &&
+		   attrs[NL80211_ATTR_MAC]) {
+		uint32_t frames;
+		char buf[3*6];
+
+		frames = nla_get_u32(cqm[NL80211_ATTR_CQM_PKT_LOSS_EVENT]);
+		mac_addr_n2a(buf, nla_data(attrs[NL80211_ATTR_MAC]));
+		printf("peer %s didn't ACK %d packets\n", buf, frames);
+	} else
+		printf("unknown event\n");
+}
+
+static const char * key_type_str(enum nl80211_key_type key_type)
+{
+	static char buf[30];
+	switch (key_type) {
+	case NL80211_KEYTYPE_GROUP:
+		return "Group";
+	case NL80211_KEYTYPE_PAIRWISE:
+		return "Pairwise";
+	case NL80211_KEYTYPE_PEERKEY:
+		return "PeerKey";
+	default:
+		snprintf(buf, sizeof(buf), "unknown(%d)", key_type);
+		return buf;
+	}
+}
+
+static void parse_mic_failure(struct nlattr **attrs)
+{
+	printf("Michael MIC failure event:");
+
+	if (attrs[NL80211_ATTR_MAC]) {
+		char addr[3 * ETH_ALEN];
+		mac_addr_n2a(addr, nla_data(attrs[NL80211_ATTR_MAC]));
+		printf(" source MAC address %s", addr);
+	}
+
+	if (attrs[NL80211_ATTR_KEY_SEQ] &&
+	    nla_len(attrs[NL80211_ATTR_KEY_SEQ]) == 6) {
+		unsigned char *seq = nla_data(attrs[NL80211_ATTR_KEY_SEQ]);
+		printf(" seq=%02x%02x%02x%02x%02x%02x",
+		       seq[0], seq[1], seq[2], seq[3], seq[4], seq[5]);
+	}
+	if (attrs[NL80211_ATTR_KEY_TYPE]) {
+		enum nl80211_key_type key_type =
+			nla_get_u32(attrs[NL80211_ATTR_KEY_TYPE]);
+		printf(" Key Type %s", key_type_str(key_type));
+	}
+
+	if (attrs[NL80211_ATTR_KEY_IDX]) {
+		__u8 key_id = nla_get_u8(attrs[NL80211_ATTR_KEY_IDX]);
+		printf(" Key Id %d", key_id);
+	}
+
+	printf("\n");
+}
+
+static void parse_wowlan_wake_event(struct nlattr **attrs)
+{
+	struct nlattr *tb[NUM_NL80211_WOWLAN_TRIG];
+
+	printf("WoWLAN wakeup\n");
+	if (!attrs[NL80211_ATTR_WOWLAN_TRIGGERS]) {
+		printf("\twakeup not due to WoWLAN\n");
+		return;
+	}
+
+	nla_parse(tb, MAX_NL80211_WOWLAN_TRIG,
+		  nla_data(attrs[NL80211_ATTR_WOWLAN_TRIGGERS]),
+		  nla_len(attrs[NL80211_ATTR_WOWLAN_TRIGGERS]), NULL);
+
+	if (tb[NL80211_WOWLAN_TRIG_DISCONNECT])
+		printf("\t* was disconnected\n");
+	if (tb[NL80211_WOWLAN_TRIG_MAGIC_PKT])
+		printf("\t* magic packet received\n");
+	if (tb[NL80211_WOWLAN_TRIG_PKT_PATTERN])
+		printf("\t* pattern index: %u\n",
+		       nla_get_u32(tb[NL80211_WOWLAN_TRIG_PKT_PATTERN]));
+	if (tb[NL80211_WOWLAN_TRIG_GTK_REKEY_FAILURE])
+		printf("\t* GTK rekey failure\n");
+	if (tb[NL80211_WOWLAN_TRIG_EAP_IDENT_REQUEST])
+		printf("\t* EAP identity request\n");
+	if (tb[NL80211_WOWLAN_TRIG_4WAY_HANDSHAKE])
+		printf("\t* 4-way handshake\n");
+	if (tb[NL80211_WOWLAN_TRIG_RFKILL_RELEASE])
+		printf("\t* RF-kill released\n");
+	if (tb[NL80211_WOWLAN_TRIG_WAKEUP_PKT_80211]) {
+		uint8_t *d = nla_data(tb[NL80211_WOWLAN_TRIG_WAKEUP_PKT_80211]);
+		int l = nla_len(tb[NL80211_WOWLAN_TRIG_WAKEUP_PKT_80211]);
+		int i;
+		printf("\t* packet (might be truncated): ");
+		for (i = 0; i < l; i++) {
+			if (i > 0)
+				printf(":");
+			printf("%.2x", d[i]);
+		}
+		printf("\n");
+	}
+	if (tb[NL80211_WOWLAN_TRIG_WAKEUP_PKT_8023]) {
+		uint8_t *d = nla_data(tb[NL80211_WOWLAN_TRIG_WAKEUP_PKT_8023]);
+		int l = nla_len(tb[NL80211_WOWLAN_TRIG_WAKEUP_PKT_8023]);
+		int i;
+		printf("\t* packet (might be truncated): ");
+		for (i = 0; i < l; i++) {
+			if (i > 0)
+				printf(":");
+			printf("%.2x", d[i]);
+		}
+		printf("\n");
+	}
+	if (tb[NL80211_WOWLAN_TRIG_WAKEUP_TCP_MATCH])
+		printf("\t* TCP connection wakeup received\n");
+	if (tb[NL80211_WOWLAN_TRIG_WAKEUP_TCP_CONNLOST])
+		printf("\t* TCP connection lost\n");
+	if (tb[NL80211_WOWLAN_TRIG_WAKEUP_TCP_NOMORETOKENS])
+		printf("\t* TCP connection ran out of tokens\n");
+}
+
 static int print_event(struct nl_msg *msg, void *arg)
 {
-#define PARSE_BEACON_CHAN(_attr, _chan) do { \
-	r = parse_beacon_hint_chan(tb[_attr], \
-				   &_chan); \
-	if (r) \
-		return NL_SKIP; \
-} while (0)
 	struct genlmsghdr *gnlh = nlmsg_data(nlmsg_hdr(msg));
 	struct nlattr *tb[NL80211_ATTR_MAX + 1], *nst;
 	struct print_event_args *args = arg;
@@ -116,14 +270,23 @@ static int print_event(struct nl_msg *msg, void *arg)
 	__u8 reg_type;
 	struct ieee80211_beacon_channel chan_before_beacon,  chan_after_beacon;
 	__u32 wiphy_idx = 0;
-	int r;
 	int rem_nst;
 	__u16 status;
 
-	if (args->time) {
-		struct timeval tv;
-		gettimeofday(&tv, NULL);
-		printf("%ld.%06u: ", (long) tv.tv_sec, (unsigned int) tv.tv_usec);
+	if (args->time || args->reltime) {
+		unsigned long long usecs, previous;
+
+		previous = 1000000ULL * args->ts.tv_sec + args->ts.tv_usec;
+		gettimeofday(&args->ts, NULL);
+		usecs = 1000000ULL * args->ts.tv_sec + args->ts.tv_usec;
+		if (args->reltime) {
+			if (!args->have_ts) {
+				usecs = 0;
+				args->have_ts = true;
+			} else
+				usecs -= previous;
+		}
+		printf("%llu.%06llu: ", usecs/1000000, usecs % 1000000);
 	}
 
 	nla_parse(tb, NL80211_ATTR_MAX, genlmsg_attrdata(gnlh, 0),
@@ -132,9 +295,15 @@ static int print_event(struct nl_msg *msg, void *arg)
 	if (tb[NL80211_ATTR_IFINDEX] && tb[NL80211_ATTR_WIPHY]) {
 		if_indextoname(nla_get_u32(tb[NL80211_ATTR_IFINDEX]), ifname);
 		printf("%s (phy #%d): ", ifname, nla_get_u32(tb[NL80211_ATTR_WIPHY]));
+	} else if (tb[NL80211_ATTR_WDEV] && tb[NL80211_ATTR_WIPHY]) {
+		printf("wdev 0x%llx (phy #%d): ",
+			(unsigned long long)nla_get_u64(tb[NL80211_ATTR_WDEV]),
+			nla_get_u32(tb[NL80211_ATTR_WIPHY]));
 	} else if (tb[NL80211_ATTR_IFINDEX]) {
 		if_indextoname(nla_get_u32(tb[NL80211_ATTR_IFINDEX]), ifname);
 		printf("%s: ", ifname);
+	} else if (tb[NL80211_ATTR_WDEV]) {
+		printf("wdev 0x%llx: ", (unsigned long long)nla_get_u64(tb[NL80211_ATTR_WDEV]));
 	} else if (tb[NL80211_ATTR_WIPHY]) {
 		printf("phy #%d: ", nla_get_u32(tb[NL80211_ATTR_WIPHY]));
 	}
@@ -207,8 +376,12 @@ static int print_event(struct nl_msg *msg, void *arg)
 		memset(&chan_before_beacon, 0, sizeof(chan_before_beacon));
 		memset(&chan_after_beacon, 0, sizeof(chan_after_beacon));
 
-		PARSE_BEACON_CHAN(NL80211_ATTR_FREQ_BEFORE, chan_before_beacon);
-		PARSE_BEACON_CHAN(NL80211_ATTR_FREQ_AFTER, chan_after_beacon);
+		if (parse_beacon_hint_chan(tb[NL80211_ATTR_FREQ_BEFORE],
+					   &chan_before_beacon))
+			break;
+		if (parse_beacon_hint_chan(tb[NL80211_ATTR_FREQ_AFTER],
+					   &chan_after_beacon))
+			break;
 
 		if (chan_before_beacon.center_freq != chan_after_beacon.center_freq)
 			break;
@@ -226,6 +399,14 @@ static int print_event(struct nl_msg *msg, void *arg)
 		if (chan_before_beacon.no_ibss && !chan_after_beacon.no_ibss)
 			printf("\to beaconing enabled\n");
 
+		break;
+	case NL80211_CMD_NEW_STATION:
+		mac_addr_n2a(macbuf, nla_data(tb[NL80211_ATTR_MAC]));
+		printf("new station %s\n", macbuf);
+		break;
+	case NL80211_CMD_DEL_STATION:
+		mac_addr_n2a(macbuf, nla_data(tb[NL80211_ATTR_MAC]));
+		printf("del station %s\n", macbuf);
 		break;
 	case NL80211_CMD_JOIN_IBSS:
 		mac_addr_n2a(macbuf, nla_data(tb[NL80211_ATTR_MAC]));
@@ -258,6 +439,16 @@ static int print_event(struct nl_msg *msg, void *arg)
 		break;
 	case NL80211_CMD_DISASSOCIATE:
 		printf("disassoc");
+		print_frame(args, tb[NL80211_ATTR_FRAME]);
+		printf("\n");
+		break;
+	case NL80211_CMD_UNPROT_DEAUTHENTICATE:
+		printf("unprotected deauth");
+		print_frame(args, tb[NL80211_ATTR_FRAME]);
+		printf("\n");
+		break;
+	case NL80211_CMD_UNPROT_DISASSOCIATE:
+		printf("unprotected disassoc");
 		print_frame(args, tb[NL80211_ATTR_FRAME]);
 		printf("\n");
 		break;
@@ -298,13 +489,51 @@ static int print_event(struct nl_msg *msg, void *arg)
 				get_reason_str(nla_get_u16(tb[NL80211_ATTR_REASON_CODE])));
 		printf("\n");
 		break;
+	case NL80211_CMD_REMAIN_ON_CHANNEL:
+		printf("remain on freq %d (%dms, cookie %llx)\n",
+			nla_get_u32(tb[NL80211_ATTR_WIPHY_FREQ]),
+			nla_get_u32(tb[NL80211_ATTR_DURATION]),
+			(unsigned long long)nla_get_u64(tb[NL80211_ATTR_COOKIE]));
+		break;
+	case NL80211_CMD_CANCEL_REMAIN_ON_CHANNEL:
+		printf("done with remain on freq %d (cookie %llx)\n",
+			nla_get_u32(tb[NL80211_ATTR_WIPHY_FREQ]),
+			(unsigned long long)nla_get_u64(tb[NL80211_ATTR_COOKIE]));
+		break;
+	case NL80211_CMD_NOTIFY_CQM:
+		parse_cqm_event(tb);
+		break;
+	case NL80211_CMD_MICHAEL_MIC_FAILURE:
+		parse_mic_failure(tb);
+		break;
+	case NL80211_CMD_FRAME_TX_STATUS:
+		printf("mgmt TX status (cookie %llx): %s\n",
+			(unsigned long long)nla_get_u64(tb[NL80211_ATTR_COOKIE]),
+			tb[NL80211_ATTR_ACK] ? "acked" : "no ack");
+		break;
+	case NL80211_CMD_PMKSA_CANDIDATE:
+		printf("PMKSA candidate found\n");
+		break;
+	case NL80211_CMD_SET_WOWLAN:
+		parse_wowlan_wake_event(tb);
+		break;
+	case NL80211_CMD_PROBE_CLIENT:
+		if (tb[NL80211_ATTR_MAC])
+			mac_addr_n2a(macbuf, nla_data(tb[NL80211_ATTR_MAC]));
+		else
+			strcpy(macbuf, "??");
+		printf("probe client %s (cookie %llx): %s\n",
+		       macbuf,
+		       (unsigned long long)nla_get_u64(tb[NL80211_ATTR_COOKIE]),
+		       tb[NL80211_ATTR_ACK] ? "acked" : "no ack");
+		break;
 	default:
 		printf("unknown event %d\n", gnlh->cmd);
 		break;
 	}
 
+	fflush(stdout);
 	return NL_SKIP;
-#undef PARSE_BEACON_CHAN
 }
 
 struct wait_event {
@@ -323,26 +552,17 @@ static int wait_event(struct nl_msg *msg, void *arg)
 	for (i = 0; i < wait->n_cmds; i++) {
 		if (gnlh->cmd == wait->cmds[i]) {
 			wait->cmd = gnlh->cmd;
-		if (wait->pargs)
-			print_event(msg, wait->pargs);
+			if (wait->pargs)
+				print_event(msg, wait->pargs);
 		}
 	}
 
 	return NL_SKIP;
 }
 
-__u32 __listen_events(struct nl80211_state *state,
-		      const int n_waits, const __u32 *waits,
-		      struct print_event_args *args)
+int __prepare_listen_events(struct nl80211_state *state)
 {
 	int mcid, ret;
-	struct nl_cb *cb = nl_cb_alloc(iw_debug ? NL_CB_DEBUG : NL_CB_DEFAULT);
-	struct wait_event wait_ev;
-
-	if (!cb) {
-		fprintf(stderr, "failed to allocate netlink callbacks\n");
-		return -ENOMEM;
-	}
 
 	/* Configuration multicast group */
 	mcid = nl_get_multicast_id(state->nl_sock, "nl80211", "config");
@@ -377,6 +597,21 @@ __u32 __listen_events(struct nl80211_state *state,
 			return ret;
 	}
 
+	return 0;
+}
+
+__u32 __do_listen_events(struct nl80211_state *state,
+			 const int n_waits, const __u32 *waits,
+			 struct print_event_args *args)
+{
+	struct nl_cb *cb = nl_cb_alloc(iw_debug ? NL_CB_DEBUG : NL_CB_DEFAULT);
+	struct wait_event wait_ev;
+
+	if (!cb) {
+		fprintf(stderr, "failed to allocate netlink callbacks\n");
+		return -ENOMEM;
+	}
+
 	/* no sequence checking for multicast messages */
 	nl_cb_set(cb, NL_CB_SEQ_CHECK, NL_CB_CUSTOM, no_seq_check, NULL);
 
@@ -401,15 +636,23 @@ __u32 __listen_events(struct nl80211_state *state,
 __u32 listen_events(struct nl80211_state *state,
 		    const int n_waits, const __u32 *waits)
 {
-	return __listen_events(state, n_waits, waits, NULL);
+	int ret;
+
+	ret = __prepare_listen_events(state);
+	if (ret)
+		return ret;
+
+	return __do_listen_events(state, n_waits, waits, NULL);
 }
 
 static int print_events(struct nl80211_state *state,
 			struct nl_cb *cb,
 			struct nl_msg *msg,
-			int argc, char **argv)
+			int argc, char **argv,
+			enum id_input id)
 {
 	struct print_event_args args;
+	int ret;
 
 	memset(&args, 0, sizeof(args));
 
@@ -421,18 +664,28 @@ static int print_events(struct nl80211_state *state,
 			args.frame = true;
 		else if (strcmp(argv[0], "-t") == 0)
 			args.time = true;
+		else if (strcmp(argv[0], "-r") == 0)
+			args.reltime = true;
 		else
 			return 1;
 		argc--;
 		argv++;
 	}
 
+	if (args.time && args.reltime)
+		return 1;
+
 	if (argc)
 		return 1;
 
-	return __listen_events(state, 0, NULL, &args);
+	ret = __prepare_listen_events(state);
+	if (ret)
+		return ret;
+
+	return __do_listen_events(state, 0, NULL, &args);
 }
-TOPLEVEL(event, "[-t] [-f]", 0, 0, CIB_NONE, print_events,
+TOPLEVEL(event, "[-t] [-r] [-f]", 0, 0, CIB_NONE, print_events,
 	"Monitor events from the kernel.\n"
 	"-t - print timestamp\n"
+	"-r - print relative timstamp\n"
 	"-f - print full frame for auth/assoc etc.");

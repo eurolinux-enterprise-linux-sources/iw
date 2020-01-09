@@ -1,9 +1,7 @@
 #!/bin/sh
 
-VERSION="0.9.17"
+VERSION="3.10"
 OUT="$1"
-
-echo '#include "iw.h"' > "$OUT"
 
 if head=`git rev-parse --verify HEAD 2>/dev/null`; then
 	git update-index --refresh --unmerged > /dev/null
@@ -21,4 +19,5 @@ else
 	v="$VERSION"
 fi
 
+echo '#include "iw.h"' > "$OUT"
 echo "const char iw_version[] = \"$v\";" >> "$OUT"

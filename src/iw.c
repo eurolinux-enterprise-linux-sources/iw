@@ -13,19 +13,18 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdbool.h>
-                     
+
 #include <netlink/genl/genl.h>
 #include <netlink/genl/family.h>
-#include <netlink/genl/ctrl.h>  
+#include <netlink/genl/ctrl.h>
 #include <netlink/msg.h>
 #include <netlink/attr.h>
 
 #include "nl80211.h"
 #include "iw.h"
 
-#ifndef CONFIG_LIBNL20
-/* libnl 2.0 compatibility code */
-
+/* libnl 1.x compatibility code */
+#if !defined(CONFIG_LIBNL20) && !defined(CONFIG_LIBNL30)
 static inline struct nl_handle *nl_socket_alloc(void)
 {
 	return nl_handle_alloc();
@@ -36,16 +35,12 @@ static inline void nl_socket_free(struct nl_sock *h)
 	nl_handle_destroy(h);
 }
 
-static inline int __genl_ctrl_alloc_cache(struct nl_sock *h, struct nl_cache **cache)
+static inline int nl_socket_set_buffer_size(struct nl_sock *sk,
+					    int rxbuf, int txbuf)
 {
-	struct nl_cache *tmp = genl_ctrl_alloc_cache(h);
-	if (!tmp)
-		return -ENOMEM;
-	*cache = tmp;
-	return 0;
+	return nl_set_buffer_size(sk, rxbuf, txbuf);
 }
-#define genl_ctrl_alloc_cache __genl_ctrl_alloc_cache
-#endif /* CONFIG_LIBNL20 */
+#endif /* CONFIG_LIBNL20 && CONFIG_LIBNL30 */
 
 int iw_debug = 0;
 
@@ -59,29 +54,23 @@ static int nl80211_init(struct nl80211_state *state)
 		return -ENOMEM;
 	}
 
+	nl_socket_set_buffer_size(state->nl_sock, 8192, 8192);
+
 	if (genl_connect(state->nl_sock)) {
 		fprintf(stderr, "Failed to connect to generic netlink.\n");
 		err = -ENOLINK;
 		goto out_handle_destroy;
 	}
 
-	if (genl_ctrl_alloc_cache(state->nl_sock, &state->nl_cache)) {
-		fprintf(stderr, "Failed to allocate generic netlink cache.\n");
-		err = -ENOMEM;
-		goto out_handle_destroy;
-	}
-
-	state->nl80211 = genl_ctrl_search_by_name(state->nl_cache, "nl80211");
-	if (!state->nl80211) {
+	state->nl80211_id = genl_ctrl_resolve(state->nl_sock, "nl80211");
+	if (state->nl80211_id < 0) {
 		fprintf(stderr, "nl80211 not found.\n");
 		err = -ENOENT;
-		goto out_cache_free;
+		goto out_handle_destroy;
 	}
 
 	return 0;
 
- out_cache_free:
-	nl_cache_free(state->nl_cache);
  out_handle_destroy:
 	nl_socket_free(state->nl_sock);
 	return err;
@@ -89,8 +78,6 @@ static int nl80211_init(struct nl80211_state *state)
 
 static void nl80211_cleanup(struct nl80211_state *state)
 {
-	genl_family_put(state->nl80211);
-	nl_cache_free(state->nl_cache);
 	nl_socket_free(state->nl_sock);
 }
 
@@ -119,13 +106,47 @@ static void __usage_cmd(const struct cmd *cmd, char *indent, bool full)
 	case CIB_NETDEV:
 		printf("dev <devname> ");
 		break;
+	case CIB_WDEV:
+		printf("wdev <idx> ");
+		break;
 	}
 	if (cmd->parent && cmd->parent->name)
 		printf("%s ", cmd->parent->name);
 	printf("%s", cmd->name);
-	if (cmd->args)
-		printf(" %s", cmd->args);
-	printf("\n");
+
+	if (cmd->args) {
+		/* print line by line */
+		start = cmd->args;
+		end = strchr(start, '\0');
+		printf(" ");
+		do {
+			lend = strchr(start, '\n');
+			if (!lend)
+				lend = end;
+			if (start != cmd->args) {
+				printf("\t");
+				switch (cmd->idby) {
+				case CIB_NONE:
+					break;
+				case CIB_PHY:
+					printf("phy <phyname> ");
+					break;
+				case CIB_NETDEV:
+					printf("dev <devname> ");
+					break;
+				case CIB_WDEV:
+					printf("wdev <idx> ");
+					break;
+				}
+				if (cmd->parent && cmd->parent->name)
+					printf("%s ", cmd->parent->name);
+				printf("%s ", cmd->name);
+			}
+			printf("%.*s\n", (int)(lend - start), start);
+			start = lend + 1;
+		} while (end != lend);
+	} else
+		printf("\n");
 
 	if (!full || !cmd->help)
 		return;
@@ -159,9 +180,18 @@ static void usage_options(void)
 
 static const char *argv0;
 
-static void usage(bool full)
+static void usage(int argc, char **argv)
 {
 	const struct cmd *section, *cmd;
+	bool full = argc >= 0;
+	const char *sect_filt = NULL;
+	const char *cmd_filt = NULL;
+
+	if (argc > 0)
+		sect_filt = argv[0];
+
+	if (argc > 1)
+		cmd_filt = argv[1];
 
 	printf("Usage:\t%s [options] command\n", argv0);
 	usage_options();
@@ -169,6 +199,9 @@ static void usage(bool full)
 	printf("Commands:\n");
 	for_each_cmd(section) {
 		if (section->parent)
+			continue;
+
+		if (sect_filt && strcmp(section->name, sect_filt))
 			continue;
 
 		if (section->handler && !section->hidden)
@@ -179,9 +212,13 @@ static void usage(bool full)
 				continue;
 			if (!cmd->handler || cmd->hidden)
 				continue;
+			if (cmd_filt && strcmp(cmd->name, cmd_filt))
+				continue;
 			__usage_cmd(cmd, "\t", full);
 		}
 	}
+	printf("\nCommands that use the netdev ('dev') can also be given the\n"
+	       "'wdev' instead to identify the device.\n");
 	printf("\nYou can omit the 'phy' or 'dev' if "
 			"the identification is unique,\n"
 			"e.g. \"iw wlan0 info\" or \"iw phy0 info\". "
@@ -193,12 +230,14 @@ static void usage(bool full)
 static int print_help(struct nl80211_state *state,
 		      struct nl_cb *cb,
 		      struct nl_msg *msg,
-		      int argc, char **argv)
+		      int argc, char **argv,
+		      enum id_input id)
 {
 	exit(3);
 }
-TOPLEVEL(help, NULL, 0, 0, CIB_NONE, print_help,
-	 "Print usage for each command.");
+TOPLEVEL(help, "[command]", 0, 0, CIB_NONE, print_help,
+	 "Print usage for all or a specific command, e.g.\n"
+	 "\"help wowlan\" or \"help wowlan enable\".");
 
 static void usage_cmd(const struct cmd *cmd)
 {
@@ -223,9 +262,12 @@ static int phy_lookup(char *name)
 	if (fd < 0)
 		return -1;
 	pos = read(fd, buf, sizeof(buf) - 1);
-	if (pos < 0)
+	if (pos < 0) {
+		close(fd);
 		return -1;
+	}
 	buf[pos] = '\0';
+	close(fd);
 	return atoi(buf);
 }
 
@@ -256,8 +298,9 @@ static int __handle_cmd(struct nl80211_state *state, enum id_input idby,
 {
 	const struct cmd *cmd, *match = NULL, *sectcmd;
 	struct nl_cb *cb;
+	struct nl_cb *s_cb;
 	struct nl_msg *msg;
-	int devidx = 0;
+	signed long long devidx = 0;
 	int err, o_argc;
 	const char *command, *section;
 	char *tmp, **o_argv;
@@ -292,6 +335,13 @@ static int __handle_cmd(struct nl80211_state *state, enum id_input idby,
 		argc--;
 		argv++;
 		break;
+	case II_WDEV:
+		command_idby = CIB_WDEV;
+		devidx = strtoll(*argv, &tmp, 0);
+		if (*tmp != '\0')
+			return 1;
+		argc--;
+		argv++;
 	default:
 		break;
 	}
@@ -326,7 +376,13 @@ static int __handle_cmd(struct nl80211_state *state, enum id_input idby,
 				continue;
 			if (cmd->parent != sectcmd)
 				continue;
-			if (cmd->idby != command_idby)
+			/*
+			 * ignore mismatch id by, but allow WDEV
+			 * in place of NETDEV
+			 */
+			if (cmd->idby != command_idby &&
+			    !(cmd->idby == CIB_NETDEV &&
+			      command_idby == CIB_WDEV))
 				continue;
 			if (strcmp(cmd->name, command))
 				continue;
@@ -349,9 +405,16 @@ static int __handle_cmd(struct nl80211_state *state, enum id_input idby,
 		cmd = sectcmd;
 		if (argc && !cmd->args)
 			return 1;
-		if (cmd->idby != command_idby)
+		if (cmd->idby != command_idby &&
+		    !(cmd->idby == CIB_NETDEV && command_idby == CIB_WDEV))
 			return 1;
 		if (!cmd->handler)
+			return 1;
+	}
+
+	if (cmd->selector) {
+		cmd = cmd->selector(argc, argv);
+		if (!cmd)
 			return 1;
 	}
 
@@ -361,7 +424,7 @@ static int __handle_cmd(struct nl80211_state *state, enum id_input idby,
 	if (!cmd->cmd) {
 		argc = o_argc;
 		argv = o_argv;
-		return cmd->handler(state, NULL, NULL, argc, argv);
+		return cmd->handler(state, NULL, NULL, argc, argv, idby);
 	}
 
 	msg = nlmsg_alloc();
@@ -371,13 +434,14 @@ static int __handle_cmd(struct nl80211_state *state, enum id_input idby,
 	}
 
 	cb = nl_cb_alloc(iw_debug ? NL_CB_DEBUG : NL_CB_DEFAULT);
-	if (!cb) {
+	s_cb = nl_cb_alloc(iw_debug ? NL_CB_DEBUG : NL_CB_DEFAULT);
+	if (!cb || !s_cb) {
 		fprintf(stderr, "failed to allocate netlink callbacks\n");
 		err = 2;
 		goto out_free_msg;
 	}
 
-	genlmsg_put(msg, 0, 0, genl_family_get_id(state->nl80211), 0,
+	genlmsg_put(msg, 0, 0, state->nl80211_id, 0,
 		    cmd->nl_msg_flags, cmd->cmd, 0);
 
 	switch (command_idby) {
@@ -387,13 +451,18 @@ static int __handle_cmd(struct nl80211_state *state, enum id_input idby,
 	case CIB_NETDEV:
 		NLA_PUT_U32(msg, NL80211_ATTR_IFINDEX, devidx);
 		break;
+	case CIB_WDEV:
+		NLA_PUT_U64(msg, NL80211_ATTR_WDEV, devidx);
+		break;
 	default:
 		break;
 	}
 
-	err = cmd->handler(state, cb, msg, argc, argv);
+	err = cmd->handler(state, cb, msg, argc, argv, idby);
 	if (err)
 		goto out;
+
+	nl_socket_set_cb(state->nl_sock, s_cb);
 
 	err = nl_send_auto_complete(state->nl_sock, msg);
 	if (err < 0)
@@ -448,7 +517,7 @@ int main(int argc, char **argv)
 
 	/* need to treat "help" command specially so it works w/o nl80211 */
 	if (argc == 0 || strcmp(*argv, "help") == 0) {
-		usage(argc != 0);
+		usage(argc - 1, argv + 1);
 		return 0;
 	}
 
@@ -469,6 +538,10 @@ int main(int argc, char **argv)
 			err = __handle_cmd(&nlstate, II_PHY_IDX, argc, argv, &cmd);
 		else
 			goto detect;
+	} else if (strcmp(*argv, "wdev") == 0 && argc > 1) {
+		argc--;
+		argv++;
+		err = __handle_cmd(&nlstate, II_WDEV, argc, argv, &cmd);
 	} else {
 		int idx;
 		enum id_input idby = II_NONE;
@@ -484,7 +557,7 @@ int main(int argc, char **argv)
 		if (cmd)
 			usage_cmd(cmd);
 		else
-			usage(false);
+			usage(0, NULL);
 	} else if (err < 0)
 		fprintf(stderr, "command failed: %s (%d)\n", strerror(-err), err);
 
