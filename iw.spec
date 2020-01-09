@@ -1,11 +1,11 @@
 Name:           iw
 Version:        4.3
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        A nl80211 based wireless configuration tool
 
 Group:          System Environment/Base
 License:        ISC
-URL:            http://www.linuxwireless.org/en/users/Documentation/iw
+URL:            http://wireless.kernel.org/en/users/Documentation/iw
 Source0:        http://www.kernel.org/pub/software/network/iw/iw-%{version}.tar.xz
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 
@@ -44,6 +44,9 @@ rm -rf $RPM_BUILD_ROOT
 %doc COPYING
 
 %changelog
+* Thu May 31 2018 John W. Linville <linville@redhat.com> - 4.3-2
+- Update URL in package header
+
 * Tue Apr  5 2016 John W. Linville <linville@redhat.com> - 4.3-1
 - Update to 4.3
 
