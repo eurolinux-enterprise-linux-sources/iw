@@ -114,7 +114,6 @@ COMMAND(reg, set, "<ISO/IEC 3166-1 alpha2>",
 	"Notify the kernel about the current regulatory domain.");
 
 static int print_reg_handler(struct nl_msg *msg, void *arg)
-
 {
 #define PARSE_FLAG(nl_flag, string_value)  do { \
 		if ((flags & nl_flag)) { \
@@ -127,13 +126,14 @@ static int print_reg_handler(struct nl_msg *msg, void *arg)
 	struct nlattr *nl_rule;
 	int rem_rule;
 	enum nl80211_dfs_regions dfs_domain;
-	static struct nla_policy reg_rule_policy[NL80211_FREQUENCY_ATTR_MAX + 1] = {
+	static struct nla_policy reg_rule_policy[NL80211_REG_RULE_ATTR_MAX + 1] = {
 		[NL80211_ATTR_REG_RULE_FLAGS]		= { .type = NLA_U32 },
 		[NL80211_ATTR_FREQ_RANGE_START]		= { .type = NLA_U32 },
 		[NL80211_ATTR_FREQ_RANGE_END]		= { .type = NLA_U32 },
 		[NL80211_ATTR_FREQ_RANGE_MAX_BW]	= { .type = NLA_U32 },
 		[NL80211_ATTR_POWER_RULE_MAX_ANT_GAIN]	= { .type = NLA_U32 },
 		[NL80211_ATTR_POWER_RULE_MAX_EIRP]	= { .type = NLA_U32 },
+		[NL80211_ATTR_DFS_CAC_TIME]		= { .type = NLA_U32 },
 	};
 
 	nla_parse(tb_msg, NL80211_ATTR_MAX, genlmsg_attrdata(gnlh, 0),
@@ -149,6 +149,13 @@ static int print_reg_handler(struct nl_msg *msg, void *arg)
 		return NL_SKIP;
 	}
 
+	if (tb_msg[NL80211_ATTR_WIPHY])
+		printf("phy#%d%s\n", nla_get_u32(tb_msg[NL80211_ATTR_WIPHY]),
+		       tb_msg[NL80211_ATTR_WIPHY_SELF_MANAGED_REG] ?
+		       " (self-managed)" : "");
+	else
+		printf("global\n");
+
 	if (tb_msg[NL80211_ATTR_DFS_REGION])
 		dfs_domain = nla_get_u8(tb_msg[NL80211_ATTR_DFS_REGION]);
 	else
@@ -158,10 +165,10 @@ static int print_reg_handler(struct nl_msg *msg, void *arg)
 	printf("country %c%c: %s\n", alpha2[0], alpha2[1], dfs_domain_name(dfs_domain));
 
 	nla_for_each_nested(nl_rule, tb_msg[NL80211_ATTR_REG_RULES], rem_rule) {
-		struct nlattr *tb_rule[NL80211_FREQUENCY_ATTR_MAX + 1];
+		struct nlattr *tb_rule[NL80211_REG_RULE_ATTR_MAX + 1];
 		__u32 flags, start_freq_khz, end_freq_khz, max_bw_khz, max_ant_gain_mbi, max_eirp_mbm;
 
-		nla_parse(tb_rule, NL80211_FREQUENCY_ATTR_MAX, nla_data(nl_rule), nla_len(nl_rule), reg_rule_policy);
+		nla_parse(tb_rule, NL80211_REG_RULE_ATTR_MAX, nla_data(nl_rule), nla_len(nl_rule), reg_rule_policy);
 
 		flags = nla_get_u32(tb_rule[NL80211_ATTR_REG_RULE_FLAGS]);
 		start_freq_khz = nla_get_u32(tb_rule[NL80211_ATTR_FREQ_RANGE_START]);
@@ -181,6 +188,11 @@ static int print_reg_handler(struct nl_msg *msg, void *arg)
 
 		printf(", %d)", MBM_TO_DBM(max_eirp_mbm));
 
+		if ((flags & NL80211_RRF_DFS) && tb_rule[NL80211_ATTR_DFS_CAC_TIME])
+			printf(", (%u ms)", nla_get_u32(tb_rule[NL80211_ATTR_DFS_CAC_TIME]));
+		else
+			printf(", (N/A)");
+
 		if (!flags) {
 			printf("\n");
 			continue;
@@ -193,13 +205,37 @@ static int print_reg_handler(struct nl_msg *msg, void *arg)
 		PARSE_FLAG(NL80211_RRF_NO_OUTDOOR, "NO-OUTDOOR");
 		PARSE_FLAG(NL80211_RRF_DFS, "DFS");
 		PARSE_FLAG(NL80211_RRF_PTP_ONLY, "PTP-ONLY");
-		PARSE_FLAG(NL80211_RRF_PASSIVE_SCAN, "PASSIVE-SCAN");
-		PARSE_FLAG(NL80211_RRF_NO_IBSS, "NO-IBSS");
+		PARSE_FLAG(NL80211_RRF_AUTO_BW, "AUTO-BW");
+		PARSE_FLAG(NL80211_RRF_GO_CONCURRENT, "GO-CONCURRENT");
+		PARSE_FLAG(NL80211_RRF_NO_HT40MINUS, "NO-HT40MINUS");
+		PARSE_FLAG(NL80211_RRF_NO_HT40PLUS, "NO-HT40PLUS");
+		PARSE_FLAG(NL80211_RRF_NO_80MHZ, "NO-80MHZ");
+		PARSE_FLAG(NL80211_RRF_NO_160MHZ, "NO-160MHZ");
+
+		/* Kernels that support NO_IR always turn on both flags */
+		if ((flags & NL80211_RRF_NO_IR) && (flags & __NL80211_RRF_NO_IBSS)) {
+			printf(", NO-IR");
+		} else {
+			PARSE_FLAG(NL80211_RRF_PASSIVE_SCAN, "PASSIVE-SCAN");
+			PARSE_FLAG(__NL80211_RRF_NO_IBSS, "NO-IBSS");
+		}
 
 		printf("\n");
 	}
-	return NL_OK;
+
+	printf("\n");
+	return NL_SKIP;
 #undef PARSE_FLAG
+}
+
+static int handle_reg_dump(struct nl80211_state *state,
+			   struct nl_cb *cb,
+			   struct nl_msg *msg,
+			   int argc, char **argv,
+			   enum id_input id)
+{
+	nl_cb_set(cb, NL_CB_VALID, NL_CB_CUSTOM, print_reg_handler, NULL);
+	return 0;
 }
 
 static int handle_reg_get(struct nl80211_state *state,
@@ -208,8 +244,22 @@ static int handle_reg_get(struct nl80211_state *state,
 			  int argc, char **argv,
 			  enum id_input id)
 {
-	nl_cb_set(cb, NL_CB_VALID, NL_CB_CUSTOM, print_reg_handler, NULL);
-	return 0;
+	char *dump_args[] = { "reg", "dump" };
+	int err;
+
+	err = handle_cmd(state, CIB_NONE, 2, dump_args);
+	/* dump might fail since it's not supported on older kernels */
+	if (err == -EOPNOTSUPP) {
+		nl_cb_set(cb, NL_CB_VALID, NL_CB_CUSTOM, print_reg_handler,
+			  NULL);
+		return 0;
+	}
+
+	return err;
 }
 COMMAND(reg, get, NULL, NL80211_CMD_GET_REG, 0, CIB_NONE, handle_reg_get,
 	"Print out the kernel's current regulatory domain information.");
+COMMAND(reg, get, NULL, NL80211_CMD_GET_REG, 0, CIB_PHY, handle_reg_get,
+	"Print out the devices' current regulatory domain information.");
+HIDDEN(reg, dump, NULL, NL80211_CMD_GET_REG, NLM_F_DUMP, CIB_NONE,
+       handle_reg_dump);

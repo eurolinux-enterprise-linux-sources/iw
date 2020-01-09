@@ -148,7 +148,7 @@ void print_vht_info(__u32 capa, const __u8 *mcs);
 char *channel_width_name(enum nl80211_chan_width width);
 const char *iftype_name(enum nl80211_iftype iftype);
 const char *command_name(enum nl80211_commands cmd);
-int ieee80211_channel_to_frequency(int chan);
+int ieee80211_channel_to_frequency(int chan, enum nl80211_band band);
 int ieee80211_frequency_to_channel(int freq);
 
 void print_ssid_escaped(const uint8_t len, const uint8_t *data);
@@ -170,7 +170,12 @@ enum print_ie_type {
 void print_ies(unsigned char *ie, int ielen, bool unknown,
 	       enum print_ie_type ptype);
 
-void parse_tx_bitrate(struct nlattr *bitrate_attr, char *buf, int buflen);
+void parse_bitrate(struct nlattr *bitrate_attr, char *buf, int buflen);
+void iw_hexdump(const char *prefix, const __u8 *data, size_t len);
+
+#define SCHED_SCAN_OPTIONS "interval <in_msecs> [delay <in_secs>] " \
+	"[freqs <freq>+] [matches [ssid <ssid>]+]] [active [ssid <ssid>]+|passive] [randomise[=<addr>/<mask>]]"
+int parse_sched_scan(struct nl_msg *msg, int *argc, char ***argv);
 
 DECLARE_SECTION(set);
 DECLARE_SECTION(get);

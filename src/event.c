@@ -11,7 +11,7 @@ static int no_seq_check(struct nl_msg *msg, void *arg)
 
 struct ieee80211_beacon_channel {
 	__u16 center_freq;
-	bool passive_scan;
+	bool no_ir;
 	bool no_ibss;
 };
 
@@ -21,8 +21,8 @@ static int parse_beacon_hint_chan(struct nlattr *tb,
 	struct nlattr *tb_freq[NL80211_FREQUENCY_ATTR_MAX + 1];
 	static struct nla_policy beacon_freq_policy[NL80211_FREQUENCY_ATTR_MAX + 1] = {
 		[NL80211_FREQUENCY_ATTR_FREQ] = { .type = NLA_U32 },
-		[NL80211_FREQUENCY_ATTR_PASSIVE_SCAN] = { .type = NLA_FLAG },
-		[NL80211_FREQUENCY_ATTR_NO_IBSS] = { .type = NLA_FLAG },
+		[NL80211_FREQUENCY_ATTR_NO_IR] = { .type = NLA_FLAG },
+		[__NL80211_FREQUENCY_ATTR_NO_IBSS] = { .type = NLA_FLAG },
 	};
 
 	if (nla_parse_nested(tb_freq,
@@ -33,9 +33,9 @@ static int parse_beacon_hint_chan(struct nlattr *tb,
 
 	chan->center_freq = nla_get_u32(tb_freq[NL80211_FREQUENCY_ATTR_FREQ]);
 
-	if (tb_freq[NL80211_FREQUENCY_ATTR_PASSIVE_SCAN])
-		chan->passive_scan = true;
-	if (tb_freq[NL80211_FREQUENCY_ATTR_NO_IBSS])
+	if (tb_freq[NL80211_FREQUENCY_ATTR_NO_IR])
+		chan->no_ir = true;
+	if (tb_freq[__NL80211_FREQUENCY_ATTR_NO_IBSS])
 		chan->no_ibss = true;
 
 	return 0;
@@ -79,7 +79,6 @@ static void print_frame(struct print_event_args *args, struct nlattr *attr)
 		/* status */
 		tmp = (frame[29] << 8) + frame[28];
 		printf(" status: %d: %s", tmp, get_status_str(tmp));
-		break;
 		break;
 	case 0xa0: /* disassoc */
 	case 0xc0: /* deauth */
@@ -201,7 +200,8 @@ static void parse_mic_failure(struct nlattr **attrs)
 
 static void parse_wowlan_wake_event(struct nlattr **attrs)
 {
-	struct nlattr *tb[NUM_NL80211_WOWLAN_TRIG];
+	struct nlattr *tb[NUM_NL80211_WOWLAN_TRIG],
+		*tb_match[NUM_NL80211_ATTR];
 
 	printf("WoWLAN wakeup\n");
 	if (!attrs[NL80211_ATTR_WOWLAN_TRIGGERS]) {
@@ -228,6 +228,31 @@ static void parse_wowlan_wake_event(struct nlattr **attrs)
 		printf("\t* 4-way handshake\n");
 	if (tb[NL80211_WOWLAN_TRIG_RFKILL_RELEASE])
 		printf("\t* RF-kill released\n");
+	if (tb[NL80211_WOWLAN_TRIG_NET_DETECT_RESULTS]) {
+		struct nlattr *match, *freq;
+		int rem_nst, rem_nst2;
+
+		printf("\t* network detected\n");
+		nla_for_each_nested(match,
+				    tb[NL80211_WOWLAN_TRIG_NET_DETECT_RESULTS],
+				    rem_nst) {
+			nla_parse(tb_match, NUM_NL80211_ATTR, nla_data(match),
+				  nla_len(match),
+				  NULL);
+			printf("\t\tSSID: \"");
+			print_ssid_escaped(nla_len(tb_match[NL80211_ATTR_SSID]),
+					   nla_data(tb_match[NL80211_ATTR_SSID]));
+			printf("\"");
+			if (tb_match[NL80211_ATTR_SCAN_FREQUENCIES]) {
+				printf(" freq(s):");
+				nla_for_each_nested(freq,
+						    tb_match[NL80211_ATTR_SCAN_FREQUENCIES],
+						    rem_nst2)
+					printf(" %d", nla_get_u32(freq));
+			}
+			printf("\n");
+		}
+	}
 	if (tb[NL80211_WOWLAN_TRIG_WAKEUP_PKT_80211]) {
 		uint8_t *d = nla_data(tb[NL80211_WOWLAN_TRIG_WAKEUP_PKT_80211]);
 		int l = nla_len(tb[NL80211_WOWLAN_TRIG_WAKEUP_PKT_80211]);
@@ -334,6 +359,15 @@ static int print_event(struct nl_msg *msg, void *arg)
 		}
 		printf("\n");
 		break;
+	case NL80211_CMD_START_SCHED_SCAN:
+		printf("scheduled scan started\n");
+		break;
+	case NL80211_CMD_SCHED_SCAN_STOPPED:
+		printf("sched scan stopped\n");
+		break;
+	case NL80211_CMD_SCHED_SCAN_RESULTS:
+		printf("got scheduled scan results\n");
+		break;
 	case NL80211_CMD_REG_CHANGE:
 		printf("regulatory domain change: ");
 
@@ -394,10 +428,14 @@ static int print_event(struct nl_msg *msg, void *arg)
 		       chan_before_beacon.center_freq,
 		       ieee80211_frequency_to_channel(chan_before_beacon.center_freq));
 
-		if (chan_before_beacon.passive_scan && !chan_after_beacon.passive_scan)
-			printf("\to active scanning enabled\n");
-		if (chan_before_beacon.no_ibss && !chan_after_beacon.no_ibss)
-			printf("\to beaconing enabled\n");
+		if (chan_before_beacon.no_ir && !chan_after_beacon.no_ir) {
+			if (chan_before_beacon.no_ibss && !chan_after_beacon.no_ibss)
+				printf("\to Initiating radiation enabled\n");
+			else
+				printf("\to active scan enabled\n");
+		} else if (chan_before_beacon.no_ibss && !chan_after_beacon.no_ibss) {
+			printf("\to ibss enabled\n");
+		}
 
 		break;
 	case NL80211_CMD_NEW_STATION:
@@ -527,8 +565,43 @@ static int print_event(struct nl_msg *msg, void *arg)
 		       (unsigned long long)nla_get_u64(tb[NL80211_ATTR_COOKIE]),
 		       tb[NL80211_ATTR_ACK] ? "acked" : "no ack");
 		break;
+	case NL80211_CMD_VENDOR:
+		printf("vendor event %.6x:%d\n",
+			nla_get_u32(tb[NL80211_ATTR_VENDOR_ID]),
+			nla_get_u32(tb[NL80211_ATTR_VENDOR_SUBCMD]));
+		if (args->frame && tb[NL80211_ATTR_VENDOR_DATA])
+			iw_hexdump("vendor event",
+				   nla_data(tb[NL80211_ATTR_VENDOR_DATA]),
+				   nla_len(tb[NL80211_ATTR_VENDOR_DATA]));
+		break;
+	case NL80211_CMD_RADAR_DETECT:
+		printf("radar event ");
+		if (tb[NL80211_ATTR_RADAR_EVENT]) {
+			switch (nla_get_u32(tb[NL80211_ATTR_RADAR_EVENT])) {
+				case NL80211_RADAR_DETECTED:
+					printf("(radar detected)");
+					break;
+				case NL80211_RADAR_CAC_FINISHED:
+					printf("(cac finished)");
+					break;
+				case NL80211_RADAR_CAC_ABORTED:
+					printf("(cac aborted)");
+					break;
+				case NL80211_RADAR_NOP_FINISHED:
+					printf("(nop finished)");
+					break;
+				default:
+					printf("(unknown)");
+					break;
+			};
+		} else {
+			printf("(unknown)");
+		}
+		printf("\n");
+		break;
 	default:
-		printf("unknown event %d\n", gnlh->cmd);
+		printf("unknown event %d (%s)\n",
+		       gnlh->cmd, command_name(gnlh->cmd));
 		break;
 	}
 
@@ -591,6 +664,13 @@ int __prepare_listen_events(struct nl80211_state *state)
 
 	/* MLME multicast group */
 	mcid = nl_get_multicast_id(state->nl_sock, "nl80211", "mlme");
+	if (mcid >= 0) {
+		ret = nl_socket_add_membership(state->nl_sock, mcid);
+		if (ret)
+			return ret;
+	}
+
+	mcid = nl_get_multicast_id(state->nl_sock, "nl80211", "vendor");
 	if (mcid >= 0) {
 		ret = nl_socket_add_membership(state->nl_sock, mcid);
 		if (ret)

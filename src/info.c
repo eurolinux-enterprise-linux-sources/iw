@@ -63,6 +63,18 @@ static char *dfs_state_name(enum nl80211_dfs_state state)
 	}
 }
 
+static int ext_feature_isset(const unsigned char *ext_features, int ext_features_len,
+			     enum nl80211_ext_feature_index ftidx)
+{
+	unsigned char ft_byte;
+
+	if ((int) ftidx / 8 >= ext_features_len)
+		return 0;
+
+	ft_byte = ext_features[ftidx / 8];
+	return (ft_byte & BIT(ftidx % 8)) != 0;
+}
+
 static int print_phy_handler(struct nl_msg *msg, void *arg)
 {
 	struct nlattr *tb_msg[NL80211_ATTR_MAX + 1];
@@ -74,8 +86,8 @@ static int print_phy_handler(struct nl_msg *msg, void *arg)
 	static struct nla_policy freq_policy[NL80211_FREQUENCY_ATTR_MAX + 1] = {
 		[NL80211_FREQUENCY_ATTR_FREQ] = { .type = NLA_U32 },
 		[NL80211_FREQUENCY_ATTR_DISABLED] = { .type = NLA_FLAG },
-		[NL80211_FREQUENCY_ATTR_PASSIVE_SCAN] = { .type = NLA_FLAG },
-		[NL80211_FREQUENCY_ATTR_NO_IBSS] = { .type = NLA_FLAG },
+		[NL80211_FREQUENCY_ATTR_NO_IR] = { .type = NLA_FLAG },
+		[__NL80211_FREQUENCY_ATTR_NO_IBSS] = { .type = NLA_FLAG },
 		[NL80211_FREQUENCY_ATTR_RADAR] = { .type = NLA_FLAG },
 		[NL80211_FREQUENCY_ATTR_MAX_TX_POWER] = { .type = NLA_U32 },
 	};
@@ -172,10 +184,16 @@ static int print_phy_handler(struct nl_msg *msg, void *arg)
 						print_flag("disabled", &open);
 						goto next;
 					}
-					if (tb_freq[NL80211_FREQUENCY_ATTR_PASSIVE_SCAN])
-						print_flag("passive scanning", &open);
-					if (tb_freq[NL80211_FREQUENCY_ATTR_NO_IBSS])
-						print_flag("no IBSS", &open);
+
+					/* If both flags are set assume an new kernel */
+					if (tb_freq[NL80211_FREQUENCY_ATTR_NO_IR] && tb_freq[__NL80211_FREQUENCY_ATTR_NO_IBSS]) {
+						print_flag("no IR", &open);
+					} else if (tb_freq[NL80211_FREQUENCY_ATTR_PASSIVE_SCAN]) {
+						print_flag("passive scan", &open);
+					} else if (tb_freq[__NL80211_FREQUENCY_ATTR_NO_IBSS]){
+						print_flag("no ibss", &open);
+					}
+
 					if (tb_freq[NL80211_FREQUENCY_ATTR_RADAR])
 						print_flag("radar detection", &open);
 next:
@@ -193,6 +211,9 @@ next:
 							printf(" (for %lu sec)", time/1000);
 						}
 						printf("\n");
+						if (tb_freq[NL80211_FREQUENCY_ATTR_DFS_CAC_TIME])
+							printf("\t\t\t  DFS CAC time: %u ms\n",
+							       nla_get_u32(tb_freq[NL80211_FREQUENCY_ATTR_DFS_CAC_TIME]));
 					}
 
 				}
@@ -223,6 +244,12 @@ next:
 	if (tb_msg[NL80211_ATTR_MAX_SCAN_IE_LEN])
 		printf("\tmax scan IEs length: %d bytes\n",
 		       nla_get_u16(tb_msg[NL80211_ATTR_MAX_SCAN_IE_LEN]));
+	if (tb_msg[NL80211_ATTR_MAX_NUM_SCHED_SCAN_SSIDS])
+		printf("\tmax # sched scan SSIDs: %d\n",
+		       nla_get_u8(tb_msg[NL80211_ATTR_MAX_NUM_SCHED_SCAN_SSIDS]));
+	if (tb_msg[NL80211_ATTR_MAX_MATCH_SETS])
+		printf("\tmax # match sets: %d\n",
+		       nla_get_u8(tb_msg[NL80211_ATTR_MAX_MATCH_SETS]));
 
 	if (tb_msg[NL80211_ATTR_WIPHY_FRAG_THRESHOLD]) {
 		unsigned int frag;
@@ -238,6 +265,22 @@ next:
 		rts = nla_get_u32(tb_msg[NL80211_ATTR_WIPHY_RTS_THRESHOLD]);
 		if (rts != (unsigned int)-1)
 			printf("\tRTS threshold: %d\n", rts);
+	}
+
+	if (tb_msg[NL80211_ATTR_WIPHY_RETRY_SHORT] ||
+	    tb_msg[NL80211_ATTR_WIPHY_RETRY_LONG]) {
+		unsigned char retry_short = 0, retry_long = 0;
+
+		if (tb_msg[NL80211_ATTR_WIPHY_RETRY_SHORT])
+			retry_short = nla_get_u8(tb_msg[NL80211_ATTR_WIPHY_RETRY_SHORT]);
+		if (tb_msg[NL80211_ATTR_WIPHY_RETRY_LONG])
+			retry_long = nla_get_u8(tb_msg[NL80211_ATTR_WIPHY_RETRY_LONG]);
+		if (retry_short == retry_long) {
+			printf("\tRetry short long limit: %d\n", retry_short);
+		} else {
+			printf("\tRetry short limit: %d\n", retry_short);
+			printf("\tRetry long limit: %d\n", retry_long);
+		}
 	}
 
 	if (tb_msg[NL80211_ATTR_WIPHY_COVERAGE_CLASS]) {
@@ -430,9 +473,10 @@ broken_combination:
 			[NL80211_WOWLAN_TRIG_EAP_IDENT_REQUEST] = { .type = NLA_FLAG },
 			[NL80211_WOWLAN_TRIG_4WAY_HANDSHAKE] = { .type = NLA_FLAG },
 			[NL80211_WOWLAN_TRIG_RFKILL_RELEASE] = { .type = NLA_FLAG },
+			[NL80211_WOWLAN_TRIG_NET_DETECT] = { .type = NLA_U32 },
 			[NL80211_WOWLAN_TRIG_TCP_CONNECTION] = { .type = NLA_NESTED },
 		};
-		struct nl80211_wowlan_pattern_support *pat;
+		struct nl80211_pattern_support *pat;
 		int err;
 
 		err = nla_parse_nested(tb_wowlan, MAX_NL80211_WOWLAN_TRIG,
@@ -467,6 +511,9 @@ broken_combination:
 				printf("\t\t * wake up on 4-way handshake\n");
 			if (tb_wowlan[NL80211_WOWLAN_TRIG_RFKILL_RELEASE])
 				printf("\t\t * wake up on rfkill release\n");
+			if (tb_wowlan[NL80211_WOWLAN_TRIG_NET_DETECT])
+				printf("\t\t * wake up on network detection, up to %d match sets\n",
+				       nla_get_u32(tb_wowlan[NL80211_WOWLAN_TRIG_NET_DETECT]));
 			if (tb_wowlan[NL80211_WOWLAN_TRIG_TCP_CONNECTION])
 				printf("\t\t * wake up on TCP connection\n");
 		}
@@ -520,12 +567,76 @@ broken_combination:
 			printf("\tDevice accepts cell base station regulatory hints.\n");
 		if (features & NL80211_FEATURE_P2P_DEVICE_NEEDS_CHANNEL)
 			printf("\tP2P Device uses a channel (of the concurrent ones)\n");
+		if (features & NL80211_FEATURE_SAE)
+			printf("\tDevice supports SAE with AUTHENTICATE command\n");
 		if (features & NL80211_FEATURE_LOW_PRIORITY_SCAN)
 			printf("\tDevice supports low priority scan.\n");
 		if (features & NL80211_FEATURE_SCAN_FLUSH)
 			printf("\tDevice supports scan flush.\n");
 		if (features & NL80211_FEATURE_AP_SCAN)
 			printf("\tDevice supports AP scan.\n");
+		if (features & NL80211_FEATURE_VIF_TXPOWER)
+			printf("\tDevice supports per-vif TX power setting\n");
+		if (features & NL80211_FEATURE_NEED_OBSS_SCAN)
+			printf("\tUserspace should do OBSS scan and generate 20/40 coex reports\n");
+		if (features & NL80211_FEATURE_P2P_GO_CTWIN)
+			printf("\tP2P GO supports CT window setting\n");
+		if (features & NL80211_FEATURE_P2P_GO_OPPPS)
+			printf("\tP2P GO supports opportunistic powersave setting\n");
+		if (features & NL80211_FEATURE_FULL_AP_CLIENT_STATE)
+			printf("\tDriver supports full state transitions for AP/GO clients\n");
+		if (features & NL80211_FEATURE_USERSPACE_MPM)
+			printf("\tDriver supports a userspace MPM\n");
+		if (features & NL80211_FEATURE_ACTIVE_MONITOR)
+			printf("\tDevice supports active monitor (which will ACK incoming frames)\n");
+		if (features & NL80211_FEATURE_AP_MODE_CHAN_WIDTH_CHANGE)
+			printf("\tDriver/device bandwidth changes during BSS lifetime (AP/GO mode)\n");
+		if (features & NL80211_FEATURE_DS_PARAM_SET_IE_IN_PROBES)
+			printf("\tDevice adds DS IE to probe requests\n");
+		if (features & NL80211_FEATURE_WFA_TPC_IE_IN_PROBES)
+			printf("\tDevice adds WFA TPC Report IE to probe requests\n");
+		if (features & NL80211_FEATURE_QUIET)
+			printf("\tDevice supports quiet requests from AP\n");
+		if (features & NL80211_FEATURE_TX_POWER_INSERTION)
+			printf("\tDevice can update TPC Report IE\n");
+		if (features & NL80211_FEATURE_ACKTO_ESTIMATION)
+			printf("\tDevice supports ACK timeout estimation.\n");
+		if (features & NL80211_FEATURE_STATIC_SMPS)
+			printf("\tDevice supports static SMPS\n");
+		if (features & NL80211_FEATURE_DYNAMIC_SMPS)
+			printf("\tDevice supports dynamic SMPS\n");
+		if (features & NL80211_FEATURE_SUPPORTS_WMM_ADMISSION)
+			printf("\tDevice supports WMM-AC admission (TSPECs)\n");
+		if (features & NL80211_FEATURE_MAC_ON_CREATE)
+			printf("\tDevice supports configuring vdev MAC-addr on create.\n");
+		if (features & NL80211_FEATURE_TDLS_CHANNEL_SWITCH)
+			printf("\tDevice supports TDLS channel switching\n");
+	}
+
+	if (tb_msg[NL80211_ATTR_EXT_FEATURES]) {
+		struct nlattr *tb = tb_msg[NL80211_ATTR_EXT_FEATURES];
+
+		if (ext_feature_isset(nla_data(tb), nla_len(tb),
+				      NL80211_EXT_FEATURE_VHT_IBSS))
+			printf("\tDevice supports VHT-IBSS.\n");
+	}
+
+	if (tb_msg[NL80211_ATTR_TDLS_SUPPORT])
+		printf("\tDevice supports T-DLS.\n");
+
+	if (tb_msg[NL80211_ATTR_COALESCE_RULE]) {
+		struct nl80211_coalesce_rule_support *rule;
+		struct nl80211_pattern_support *pat;
+
+		printf("\tCoalesce support:\n");
+		rule = nla_data(tb_msg[NL80211_ATTR_COALESCE_RULE]);
+		pat = &rule->pat;
+		printf("\t\t * Maximum %u coalesce rules supported\n"
+		       "\t\t * Each rule contains upto %u patterns of %u-%u bytes,\n"
+		       "\t\t   maximum packet offset %u bytes\n"
+		       "\t\t * Maximum supported coalescing delay %u msecs\n",
+			rule->max_rules, pat->max_patterns, pat->min_pattern_len,
+			pat->max_pattern_len, pat->max_pkt_offset, rule->max_delay);
 	}
 
 	return NL_SKIP;

@@ -181,6 +181,22 @@ static int wowlan_parse_tcp_file(struct nl_msg *msg, const char *fn)
 	return err;
 }
 
+static int wowlan_parse_net_detect(struct nl_msg *msg, int *argc, char ***argv)
+{
+	struct nlattr *nd;
+	int err = 0;
+
+	nd = nla_nest_start(msg, NL80211_WOWLAN_TRIG_NET_DETECT);
+	if (!nd)
+		return -ENOBUFS;
+
+	err = parse_sched_scan(msg, argc, argv);
+
+	nla_nest_end(msg, nd);
+
+	return err;
+}
+
 static int handle_wowlan_enable(struct nl80211_state *state, struct nl_cb *cb,
 				struct nl_msg *msg, int argc, char **argv,
 				enum id_input id)
@@ -235,6 +251,17 @@ static int handle_wowlan_enable(struct nl80211_state *state, struct nl_cb *cb,
 					err = -ENOMEM;
 					goto nla_put_failure;
 				}
+			} else if (strcmp(argv[0], "net-detect") == 0) {
+				argv++;
+				argc--;
+				if (!argc) {
+					err = 1;
+					goto nla_put_failure;
+				}
+				err = wowlan_parse_net_detect(msg, &argc, &argv);
+				if (err)
+					goto nla_put_failure;
+				continue;
 			} else {
 				err = 1;
 				goto nla_put_failure;
@@ -261,11 +288,11 @@ static int handle_wowlan_enable(struct nl80211_state *state, struct nl_cb *cb,
 			}
 
 			pattern = nla_nest_start(patterns, ++patnum);
-			NLA_PUT(patterns, NL80211_WOWLAN_PKTPAT_MASK,
+			NLA_PUT(patterns, NL80211_PKTPAT_MASK,
 				DIV_ROUND_UP(patlen, 8), mask);
-			NLA_PUT(patterns, NL80211_WOWLAN_PKTPAT_PATTERN,
-				patlen, pat);
-			NLA_PUT_U32(patterns, NL80211_WOWLAN_PKTPAT_OFFSET, pkt_offset);
+			NLA_PUT(patterns, NL80211_PKTPAT_PATTERN, patlen, pat);
+			NLA_PUT_U32(patterns, NL80211_PKTPAT_OFFSET,
+				    pkt_offset);
 			nla_nest_end(patterns, pattern);
 			free(mask);
 			free(pat);
@@ -286,7 +313,8 @@ static int handle_wowlan_enable(struct nl80211_state *state, struct nl_cb *cb,
 	return err;
 }
 COMMAND(wowlan, enable, "[any] [disconnect] [magic-packet] [gtk-rekey-failure] [eap-identity-request]"
-	" [4way-handshake] [rfkill-release] [tcp <config-file>] [patterns [offset1+]<pattern1> ...]",
+	" [4way-handshake] [rfkill-release] [net-detect " SCHED_SCAN_OPTIONS "]"
+	" [tcp <config-file>] [patterns [offset1+]<pattern1> ...]",
 	NL80211_CMD_SET_WOWLAN, 0, CIB_PHY, handle_wowlan_enable,
 	"Enable WoWLAN with the given triggers.\n"
 	"Each pattern is given as a bytestring with '-' in places where any byte\n"
@@ -301,7 +329,9 @@ COMMAND(wowlan, enable, "[any] [disconnect] [magic-packet] [gtk-rekey-failure] [
 	"  data.interval=seconds\n"
 	"  [wake=<hex packet with masked out bytes indicated by '-'>]\n"
 	"  [data.seq=len,offset[,start]]\n"
-	"  [data.tok=len,offset,<token stream>]");
+	"  [data.tok=len,offset,<token stream>]\n\n"
+	"Net-detect configuration example:\n"
+	" iw phy0 wowlan enable net-detect interval 5000 delay 30 freqs 2412 2422 matches ssid foo ssid bar");
 
 
 static int handle_wowlan_disable(struct nl80211_state *state, struct nl_cb *cb,
@@ -352,33 +382,77 @@ static int print_wowlan_handler(struct nl_msg *msg, void *arg)
 		printf(" * wake up on 4-way handshake\n");
 	if (trig[NL80211_WOWLAN_TRIG_RFKILL_RELEASE])
 		printf(" * wake up on RF-kill release\n");
+	if (trig[NL80211_WOWLAN_TRIG_NET_DETECT]) {
+		struct nlattr *match, *freq,
+			*nd[NUM_NL80211_ATTR], *tb[NUM_NL80211_ATTR];
+		int rem_match;
+
+		printf(" * wake up on network detection\n");
+		nla_parse(nd, NUM_NL80211_ATTR,
+			  nla_data(trig[NL80211_WOWLAN_TRIG_NET_DETECT]),
+			  nla_len(trig[NL80211_WOWLAN_TRIG_NET_DETECT]), NULL);
+
+		if (nd[NL80211_ATTR_SCHED_SCAN_INTERVAL])
+			printf("\tscan interval: %u msecs\n",
+			       nla_get_u32(nd[NL80211_ATTR_SCHED_SCAN_INTERVAL]));
+
+		if (nd[NL80211_ATTR_SCHED_SCAN_DELAY])
+			printf("\tinitial scan delay: %u secs\n",
+			       nla_get_u32(nd[NL80211_ATTR_SCHED_SCAN_DELAY]));
+
+		if (nd[NL80211_ATTR_SCHED_SCAN_MATCH]) {
+			printf("\tmatches:\n");
+			nla_for_each_nested(match,
+					    nd[NL80211_ATTR_SCHED_SCAN_MATCH],
+					    rem_match) {
+				nla_parse(tb, NUM_NL80211_ATTR, nla_data(match),
+					  nla_len(match),
+					  NULL);
+				printf("\t\tSSID: ");
+				print_ssid_escaped(
+					nla_len(tb[NL80211_SCHED_SCAN_MATCH_ATTR_SSID]),
+					nla_data(tb[NL80211_SCHED_SCAN_MATCH_ATTR_SSID]));
+				printf("\n");
+			}
+		}
+		if (nd[NL80211_ATTR_SCAN_FREQUENCIES]) {
+			printf("\tfrequencies:");
+			nla_for_each_nested(freq,
+					    nd[NL80211_ATTR_SCAN_FREQUENCIES],
+					    rem_match) {
+				printf(" %d", nla_get_u32(freq));
+			}
+			printf("\n");
+		}
+	}
 	if (trig[NL80211_WOWLAN_TRIG_PKT_PATTERN]) {
 		nla_for_each_nested(pattern,
 				    trig[NL80211_WOWLAN_TRIG_PKT_PATTERN],
 				    rem_pattern) {
-			struct nlattr *patattr[NUM_NL80211_WOWLAN_PKTPAT];
-			int i, patlen, masklen, pkt_offset;
+			struct nlattr *patattr[NUM_NL80211_PKTPAT];
+			int i, patlen, masklen;
 			uint8_t *mask, *pat;
-			nla_parse(patattr, MAX_NL80211_WOWLAN_PKTPAT,
-				  nla_data(pattern), nla_len(pattern),
-				  NULL);
-			if (!patattr[NL80211_WOWLAN_PKTPAT_MASK] ||
-			    !patattr[NL80211_WOWLAN_PKTPAT_PATTERN] ||
-			    !patattr[NL80211_WOWLAN_PKTPAT_OFFSET]) {
+			nla_parse(patattr, MAX_NL80211_PKTPAT,
+				  nla_data(pattern), nla_len(pattern), NULL);
+			if (!patattr[NL80211_PKTPAT_MASK] ||
+			    !patattr[NL80211_PKTPAT_PATTERN]) {
 				printf(" * (invalid pattern specification)\n");
 				continue;
 			}
-			masklen = nla_len(patattr[NL80211_WOWLAN_PKTPAT_MASK]);
-			patlen = nla_len(patattr[NL80211_WOWLAN_PKTPAT_PATTERN]);
-			pkt_offset = nla_get_u32(patattr[NL80211_WOWLAN_PKTPAT_OFFSET]);
+			masklen = nla_len(patattr[NL80211_PKTPAT_MASK]);
+			patlen = nla_len(patattr[NL80211_PKTPAT_PATTERN]);
 			if (DIV_ROUND_UP(patlen, 8) != masklen) {
 				printf(" * (invalid pattern specification)\n");
 				continue;
 			}
-			printf(" * wake up on packet offset: %d", pkt_offset);
+			if (patattr[NL80211_PKTPAT_OFFSET]) {
+				int pkt_offset =
+					nla_get_u32(patattr[NL80211_PKTPAT_OFFSET]);
+				printf(" * wake up on packet offset: %d", pkt_offset);
+			}
 			printf(" pattern: ");
-			pat = nla_data(patattr[NL80211_WOWLAN_PKTPAT_PATTERN]);
-			mask = nla_data(patattr[NL80211_WOWLAN_PKTPAT_MASK]);
+			pat = nla_data(patattr[NL80211_PKTPAT_PATTERN]);
+			mask = nla_data(patattr[NL80211_PKTPAT_MASK]);
 			for (i = 0; i < patlen; i++) {
 				if (mask[i / 8] & (1 << (i % 8)))
 					printf("%.2x", pat[i]);

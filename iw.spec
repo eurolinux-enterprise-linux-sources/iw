@@ -1,12 +1,12 @@
 Name:           iw
-Version:        3.10
-Release:        1.1%{?dist}
+Version:        4.1
+Release:        1%{?dist}
 Summary:        A nl80211 based wireless configuration tool
 
 Group:          System Environment/Base
 License:        ISC
 URL:            http://www.linuxwireless.org/en/users/Documentation/iw
-Source0:        http://wireless.kernel.org/download/iw/iw-%{version}.tar.bz2
+Source0:        http://wireless.kernel.org/download/iw/iw-%{version}.tar.xz
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 
 BuildRequires:  kernel-headers >= 2.6.24 
@@ -24,7 +24,8 @@ only because most new wireless devices being sold are now SoftMAC.
 
 
 %build
-make %{?_smp_mflags} CFLAGS="$RPM_OPT_FLAGS"
+export CFLAGS="$RPM_OPT_FLAGS"
+make %{?_smp_mflags}
 
 
 %install
@@ -43,6 +44,10 @@ rm -rf $RPM_BUILD_ROOT
 %doc COPYING
 
 %changelog
+* Mon Apr  4 2016 John W. Linville <linville@redhat.com> - 4.1-1
+- Update to 4.1
+- Correct some incorrect dates in the changelog
+
 * Fri May 31 2013 John W. Linville <linville@redhat.com> - 3.10-1.1
 - Update to 3.10
 
@@ -80,10 +85,10 @@ rm -rf $RPM_BUILD_ROOT
 * Wed May 13 2009 Adel Gadllah <adel.gadllah@gmail.com> 0.9.14-1
 - Update to 0.9.14
 
-* Tue May  2 2009 John W. Linville <linville@redhat.com> 0.9.13-1
+* Sat May  2 2009 John W. Linville <linville@redhat.com> 0.9.13-1
 - Update to 0.9.13
 
-* Mon Apr 15 2009 John W. Linville <linville@redhat.com> 0.9.12-1
+* Wed Apr 15 2009 John W. Linville <linville@redhat.com> 0.9.12-1
 - Update to 0.9.12
 
 * Mon Apr  6 2009 John W. Linville <linville@redhat.com> 0.9.11-1

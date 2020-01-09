@@ -16,7 +16,8 @@
 			"fcsfail:  show frames with FCS errors\n"\
 			"control:  show control frames\n"\
 			"otherbss: show frames from other BSSes\n"\
-			"cook:     use cooked mode"
+			"cook:     use cooked mode\n"\
+			"active:   use active mode (ACK incoming unicast packets)"
 
 SECTION(interface);
 
@@ -27,6 +28,7 @@ static char *mntr_flags[NL80211_MNTR_FLAG_MAX + 1] = {
 	"control",
 	"otherbss",
 	"cook",
+	"active",
 };
 
 static int parse_mntr_flags(int *_argc, char ***_argv,
@@ -102,6 +104,9 @@ static int get_if_type(int *argc, char ***argv, enum nl80211_iftype *type,
 	    strcmp(tpstr, "ibss") == 0) {
 		*type = NL80211_IFTYPE_ADHOC;
 		return 0;
+	} else if (strcmp(tpstr, "ocb") == 0) {
+		*type = NL80211_IFTYPE_OCB;
+		return 0;
 	} else if (strcmp(tpstr, "monitor") == 0) {
 		*type = NL80211_IFTYPE_MONITOR;
 		return 0;
@@ -169,6 +174,8 @@ static int handle_interface_add(struct nl80211_state *state,
 	char *mesh_id = NULL;
 	enum nl80211_iftype type;
 	int tpset;
+	unsigned char mac_addr[ETH_ALEN];
+	int found_mac = 0;
 
 	if (argc < 1)
 		return 1;
@@ -181,6 +188,7 @@ static int handle_interface_add(struct nl80211_state *state,
 	if (tpset)
 		return tpset;
 
+try_another:
 	if (argc) {
 		if (strcmp(argv[0], "mesh_id") == 0) {
 			argc--;
@@ -191,6 +199,17 @@ static int handle_interface_add(struct nl80211_state *state,
 			mesh_id = argv[0];
 			argc--;
 			argv++;
+		} else if (strcmp(argv[0], "addr") == 0) {
+			argc--;
+			argv++;
+			if (mac_addr_a2n(mac_addr, argv[0])) {
+				fprintf(stderr, "Invalid MAC address\n");
+				return 2;
+			}
+			argc--;
+			argv++;
+			found_mac = 1;
+			goto try_another;
 		} else if (strcmp(argv[0], "4addr") == 0) {
 			argc--;
 			argv++;
@@ -219,19 +238,21 @@ static int handle_interface_add(struct nl80211_state *state,
 	NLA_PUT_U32(msg, NL80211_ATTR_IFTYPE, type);
 	if (mesh_id)
 		NLA_PUT(msg, NL80211_ATTR_MESH_ID, strlen(mesh_id), mesh_id);
+	if (found_mac)
+		NLA_PUT(msg, NL80211_ATTR_MAC, ETH_ALEN, mac_addr);
 
 	return 0;
  nla_put_failure:
 	return -ENOBUFS;
 }
-COMMAND(interface, add, "<name> type <type> [mesh_id <meshid>] [4addr on|off] [flags <flag>*]",
+COMMAND(interface, add, "<name> type <type> [mesh_id <meshid>] [4addr on|off] [flags <flag>*] [addr <mac-addr>]",
 	NL80211_CMD_NEW_INTERFACE, 0, CIB_PHY, handle_interface_add,
 	"Add a new virtual interface with the given configuration.\n"
 	IFACE_TYPES "\n\n"
 	"The flags are only used for monitor interfaces, valid flags are:\n"
 	VALID_FLAGS "\n\n"
 	"The mesh_id is used only for mesh mode.");
-COMMAND(interface, add, "<name> type <type> [mesh_id <meshid>] [4addr on|off] [flags <flag>*]",
+COMMAND(interface, add, "<name> type <type> [mesh_id <meshid>] [4addr on|off] [flags <flag>*] [addr <mac-addr>]",
 	NL80211_CMD_NEW_INTERFACE, 0, CIB_NETDEV, handle_interface_add, NULL);
 
 static int handle_interface_del(struct nl80211_state *state,

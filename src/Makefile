@@ -13,10 +13,10 @@ CFLAGS ?= -O2 -g
 CFLAGS += -Wall -Wundef -Wstrict-prototypes -Wno-trigraphs -fno-strict-aliasing -fno-common -Werror-implicit-function-declaration
 
 OBJS = iw.o genl.o event.o info.o phy.o \
-	interface.o ibss.o station.o survey.o util.o \
-	mesh.o mpath.o scan.o reg.o version.o \
+	interface.o ibss.o station.o survey.o util.o ocb.o \
+	mesh.o mpath.o mpp.o scan.o reg.o version.o \
 	reason.o status.o connect.o link.o offch.o ps.o cqm.o \
-	bitrate.o wowlan.o roc.o p2p.o
+	bitrate.o wowlan.o coalesce.o roc.o p2p.o vendor.o
 OBJS += sections.o
 
 OBJS-$(HWSIM) += hwsim.o
@@ -101,9 +101,11 @@ version.c: version.sh $(patsubst %.o,%.c,$(VERSION_OBJS)) nl80211.h iw.h Makefil
 	@$(NQ) ' CC  ' $@
 	$(Q)$(CC) $(CFLAGS) -c -o $@ $<
 
+ifeq ($(IW_ANDROID_BUILD),)
 iw:	$(OBJS)
 	@$(NQ) ' CC  ' iw
 	$(Q)$(CC) $(LDFLAGS) $(OBJS) $(LIBS) -o iw
+endif
 
 check:
 	$(Q)$(MAKE) all CC="REAL_CC=$(CC) CHECK=\"sparse -Wall\" cgcc"

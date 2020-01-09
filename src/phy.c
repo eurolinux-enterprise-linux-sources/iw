@@ -2,6 +2,9 @@
 #include <errno.h>
 #include <net/if.h>
 #include <strings.h>
+#include <sys/param.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 #include <netlink/genl/genl.h>
 #include <netlink/genl/family.h>
@@ -113,8 +116,11 @@ static int handle_freqchan(struct nl_msg *msg, bool chan,
 	if (*end)
 		return 1;
 
-	if (chan)
-		freq = ieee80211_channel_to_frequency(freq);
+	if (chan) {
+		enum nl80211_band band;
+		band = freq <= 14 ? NL80211_BAND_2GHZ : NL80211_BAND_5GHZ;
+		freq = ieee80211_channel_to_frequency(freq, band);
+	}
 
 	NLA_PUT_U32(msg, NL80211_ATTR_WIPHY_FREQ, freq);
 
@@ -229,6 +235,88 @@ COMMAND(set, rts, "<rts threshold|off>",
 	NL80211_CMD_SET_WIPHY, 0, CIB_PHY, handle_rts,
 	"Set rts threshold.");
 
+static int handle_retry(struct nl80211_state *state,
+			struct nl_cb *cb, struct nl_msg *msg,
+			int argc, char **argv, enum id_input id)
+{
+	unsigned int retry_short = 0, retry_long = 0;
+	bool have_retry_s = false, have_retry_l = false;
+	int i;
+	enum {
+		S_NONE,
+		S_SHORT,
+		S_LONG,
+	} parser_state = S_NONE;
+
+	if (!argc || (argc != 2 && argc != 4))
+		return 1;
+
+	for (i = 0; i < argc; i++) {
+		char *end;
+		unsigned int tmpul;
+
+		if (strcmp(argv[i], "short") == 0) {
+			if (have_retry_s)
+				return 1;
+			parser_state = S_SHORT;
+			have_retry_s = true;
+		} else if (strcmp(argv[i], "long") == 0) {
+			if (have_retry_l)
+				return 1;
+			parser_state = S_LONG;
+			have_retry_l = true;
+		} else {
+			tmpul = strtoul(argv[i], &end, 10);
+			if (*end != '\0')
+				return 1;
+			if (!tmpul || tmpul > 255)
+				return -EINVAL;
+			switch (parser_state) {
+			case S_SHORT:
+				retry_short = tmpul;
+				break;
+			case S_LONG:
+				retry_long = tmpul;
+				break;
+			default:
+				return 1;
+			}
+		}
+	}
+
+	if (!have_retry_s && !have_retry_l)
+		return 1;
+	if (have_retry_s)
+		NLA_PUT_U8(msg, NL80211_ATTR_WIPHY_RETRY_SHORT, retry_short);
+	if (have_retry_l)
+		NLA_PUT_U8(msg, NL80211_ATTR_WIPHY_RETRY_LONG, retry_long);
+
+	return 0;
+ nla_put_failure:
+	return -ENOBUFS;
+}
+COMMAND(set, retry, "[short <limit>] [long <limit>]",
+	NL80211_CMD_SET_WIPHY, 0, CIB_PHY, handle_retry,
+	"Set retry limit.");
+
+#ifndef NETNS_RUN_DIR
+#define NETNS_RUN_DIR "/var/run/netns"
+#endif
+int netns_get_fd(const char *name)
+{
+	char pathbuf[MAXPATHLEN];
+	const char *path, *ptr;
+
+	path = name;
+	ptr = strchr(name, '/');
+	if (!ptr) {
+		snprintf(pathbuf, sizeof(pathbuf), "%s/%s",
+			NETNS_RUN_DIR, name );
+		path = pathbuf;
+	}
+	return open(path, O_RDONLY);
+}
+
 static int handle_netns(struct nl80211_state *state,
 			struct nl_cb *cb,
 			struct nl_msg *msg,
@@ -236,26 +324,42 @@ static int handle_netns(struct nl80211_state *state,
 			enum id_input id)
 {
 	char *end;
+	int fd;
 
-	if (argc != 1)
+	if (argc < 1 || !*argv[0])
 		return 1;
 
-	if (!*argv[0])
+	if (argc == 1) {
+		NLA_PUT_U32(msg, NL80211_ATTR_PID,
+				strtoul(argv[0], &end, 10));
+		if (*end != '\0') {
+			printf("Invalid parameter: pid(%s)\n", argv[0]);
+			return 1;
+		}
+		return 0;
+	}
+
+	if (argc != 2 || strcmp(argv[0], "name"))
 		return 1;
 
-	NLA_PUT_U32(msg, NL80211_ATTR_PID,
-		    strtoul(argv[0], &end, 10));
+	if ((fd = netns_get_fd(argv[1])) >= 0) {
+		NLA_PUT_U32(msg, NL80211_ATTR_NETNS_FD, fd);
+		return 0;
+	} else {
+		printf("Invalid parameter: nsname(%s)\n", argv[0]);
+	}
 
-	if (*end != '\0')
-		return 1;
+	return 1;
 
-	return 0;
  nla_put_failure:
 	return -ENOBUFS;
 }
-COMMAND(set, netns, "<pid>",
+COMMAND(set, netns, "{ <pid> | name <nsname> }",
 	NL80211_CMD_SET_WIPHY_NETNS, 0, CIB_PHY, handle_netns,
-	"Put this wireless device into a different network namespace");
+	"Put this wireless device into a different network namespace:\n"
+	"    <pid>    - change network namespace by process id\n"
+	"    <nsname> - change network namespace by name from "NETNS_RUN_DIR"\n"
+	"               or by absolute path (man ip-netns)\n");
 
 static int handle_coverage(struct nl80211_state *state,
 			struct nl_cb *cb,
@@ -295,39 +399,46 @@ static int handle_distance(struct nl80211_state *state,
 			int argc, char **argv,
 			enum id_input id)
 {
-	char *end;
-	unsigned int distance, coverage;
-
 	if (argc != 1)
 		return 1;
 
 	if (!*argv[0])
 		return 1;
 
-	distance = strtoul(argv[0], &end, 10);
+	if (strcmp("auto", argv[0]) == 0) {
+		NLA_PUT_FLAG(msg, NL80211_ATTR_WIPHY_DYN_ACK);
+	} else {
+		char *end;
+		unsigned int distance, coverage;
 
-	if (*end)
-		return 1;
+		distance = strtoul(argv[0], &end, 10);
 
-	/*
-	 * Divide double the distance by the speed of light in m/usec (300) to
-	 * get round-trip time in microseconds and then divide the result by
-	 * three to get coverage class as specified in IEEE 802.11-2007 table
-	 * 7-27. Values are rounded upwards.
-	 */
-	coverage = (distance + 449) / 450;
-	if (coverage > 255)
-		return 1;
+		if (*end)
+			return 1;
 
-	NLA_PUT_U8(msg, NL80211_ATTR_WIPHY_COVERAGE_CLASS, coverage);
+		/*
+		 * Divide double the distance by the speed of light
+		 * in m/usec (300) to get round-trip time in microseconds
+		 * and then divide the result by three to get coverage class
+		 * as specified in IEEE 802.11-2007 table 7-27.
+		 * Values are rounded upwards.
+		 */
+		coverage = (distance + 449) / 450;
+		if (coverage > 255)
+			return 1;
+
+		NLA_PUT_U8(msg, NL80211_ATTR_WIPHY_COVERAGE_CLASS, coverage);
+	}
 
 	return 0;
  nla_put_failure:
 	return -ENOBUFS;
 }
-COMMAND(set, distance, "<distance>",
+COMMAND(set, distance, "<auto|distance>",
 	NL80211_CMD_SET_WIPHY, 0, CIB_PHY, handle_distance,
-	"Set appropriate coverage class for given link distance in meters.\n"
+	"Enable ACK timeout estimation algorithm (dynack) or set appropriate\n"
+	"coverage class for given link distance in meters.\n"
+	"To disable dynack set valid value for coverage class.\n"
 	"Valid values: 0 - 114750");
 
 static int handle_txpower(struct nl80211_state *state,
