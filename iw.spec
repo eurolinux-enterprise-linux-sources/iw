@@ -1,6 +1,6 @@
 Name:           iw
 Version:        3.10
-Release:        2.1%{?dist}
+Release:        4%{?dist}
 Summary:        A nl80211 based wireless configuration tool
 
 Group:          System Environment/Base
@@ -43,6 +43,12 @@ rm -rf $RPM_BUILD_ROOT
 %doc COPYING
 
 %changelog
+* Fri Jan 24 2014 Daniel Mach <dmach@redhat.com> - 3.10-4
+- Mass rebuild 2014-01-24
+
+* Fri Dec 27 2013 Daniel Mach <dmach@redhat.com> - 3.10-3
+- Mass rebuild 2013-12-27
+
 * Tue Oct 15 2013 John W. Linville <linville@redhat.com> 3.10-2.1
 - Bump release for RHEL versioning rules
 
