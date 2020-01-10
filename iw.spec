@@ -1,12 +1,12 @@
 Name:           iw
-Version:        4.3
-Release:        2%{?dist}
+Version:        3.10
+Release:        2.1%{?dist}
 Summary:        A nl80211 based wireless configuration tool
 
 Group:          System Environment/Base
 License:        ISC
-URL:            http://wireless.kernel.org/en/users/Documentation/iw
-Source0:        http://www.kernel.org/pub/software/network/iw/iw-%{version}.tar.xz
+URL:            http://www.linuxwireless.org/en/users/Documentation/iw
+Source0:        http://www.kernel.org/pub/software/network/iw/iw-%{version}.tar.bz2
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 
 BuildRequires:  kernel-headers >= 2.6.24 
@@ -24,13 +24,12 @@ only because most new wireless devices being sold are now SoftMAC.
 
 
 %build
-export CFLAGS="%{optflags}"
-make %{?_smp_mflags}
+make %{?_smp_mflags} CFLAGS="$RPM_OPT_FLAGS"
 
 
 %install
 rm -rf $RPM_BUILD_ROOT
-make install DESTDIR=$RPM_BUILD_ROOT MANDIR=%{_mandir}
+make install DESTDIR=$RPM_BUILD_ROOT PREFIX='' MANDIR=%{_mandir}
 
 
 %clean
@@ -39,30 +38,11 @@ rm -rf $RPM_BUILD_ROOT
 
 %files
 %defattr(-,root,root,-)
-%{_sbindir}/%{name}
+/sbin/%{name}
 %{_datadir}/man/man8/iw.*
 %doc COPYING
 
 %changelog
-* Thu May 31 2018 John W. Linville <linville@redhat.com> - 4.3-2
-- Update URL in package header
-
-* Tue Apr  5 2016 John W. Linville <linville@redhat.com> - 4.3-1
-- Update to 4.3
-
-* Wed Jul 30 2014 John W. Linville <linville@redhat.com> - 3.10-6
-- Minor spec file change to make the build more reliable
-
-* Mon Jul 14 2014 John W. Linville <linville@redhat.com> - 3.10-5
-- Correct some bogus dates in the changelog
-- Move /sbin/iw to /usr/sbin/iw
-
-* Fri Jan 24 2014 Daniel Mach <dmach@redhat.com> - 3.10-4
-- Mass rebuild 2014-01-24
-
-* Fri Dec 27 2013 Daniel Mach <dmach@redhat.com> - 3.10-3
-- Mass rebuild 2013-12-27
-
 * Tue Oct 15 2013 John W. Linville <linville@redhat.com> 3.10-2.1
 - Bump release for RHEL versioning rules
 
@@ -81,7 +61,7 @@ rm -rf $RPM_BUILD_ROOT
 * Wed Oct 17 2012 John W. Linville <linville@redhat.com> 3.7-1
 - Update to 3.7
 
-* Mon Aug 13 2012 John W. Linville <linville@redhat.com> 3.6-1
+* Thu Aug 13 2012 John W. Linville <linville@redhat.com> 3.6-1
 - Update to 3.6
 
 * Thu Jul 19 2012 Fedora Release Engineering <rel-eng@lists.fedoraproject.org> - 3.5-2
@@ -126,13 +106,13 @@ rm -rf $RPM_BUILD_ROOT
 * Thu Jan 14 2010 John W. Linville <linville@redhat.com> 0.9.19-1
 - Update to 0.9.19
 
-* Mon Dec 21 2009 John W. Linville <linville@redhat.com> 0.9.18-4
+* Tue Dec 21 2009 John W. Linville <linville@redhat.com> 0.9.18-4
 - Remove unnecessary explicit Requires of libnl -- oops!
 
-* Mon Dec 21 2009 John W. Linville <linville@redhat.com> 0.9.18-3
+* Tue Dec 21 2009 John W. Linville <linville@redhat.com> 0.9.18-3
 - Add libnl to Requires
 
-* Fri Dec 18 2009 John W. Linville <linville@redhat.com> 0.9.18-2
+* Wed Dec 18 2009 John W. Linville <linville@redhat.com> 0.9.18-2
 - BuildRequires kernels-headers instead of kernel-devel
 
 * Wed Dec  2 2009 John W. Linville <linville@redhat.com> 0.9.18-1
@@ -159,10 +139,10 @@ rm -rf $RPM_BUILD_ROOT
 * Wed May 13 2009 Adel Gadllah <adel.gadllah@gmail.com> 0.9.14-1
 - Update to 0.9.14
 
-* Sat May  2 2009 John W. Linville <linville@redhat.com> 0.9.13-1
+* Tue May  2 2009 John W. Linville <linville@redhat.com> 0.9.13-1
 - Update to 0.9.13
 
-* Wed Apr 15 2009 John W. Linville <linville@redhat.com> 0.9.12-1
+* Mon Apr 15 2009 John W. Linville <linville@redhat.com> 0.9.12-1
 - Update to 0.9.12
 
 * Mon Apr  6 2009 John W. Linville <linville@redhat.com> 0.9.11-1

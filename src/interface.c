@@ -16,8 +16,7 @@
 			"fcsfail:  show frames with FCS errors\n"\
 			"control:  show control frames\n"\
 			"otherbss: show frames from other BSSes\n"\
-			"cook:     use cooked mode\n"\
-			"active:   use active mode (ACK incoming unicast packets)"
+			"cook:     use cooked mode"
 
 SECTION(interface);
 
@@ -28,7 +27,6 @@ static char *mntr_flags[NL80211_MNTR_FLAG_MAX + 1] = {
 	"control",
 	"otherbss",
 	"cook",
-	"active",
 };
 
 static int parse_mntr_flags(int *_argc, char ***_argv,
@@ -104,9 +102,6 @@ static int get_if_type(int *argc, char ***argv, enum nl80211_iftype *type,
 	    strcmp(tpstr, "ibss") == 0) {
 		*type = NL80211_IFTYPE_ADHOC;
 		return 0;
-	} else if (strcmp(tpstr, "ocb") == 0) {
-		*type = NL80211_IFTYPE_OCB;
-		return 0;
 	} else if (strcmp(tpstr, "monitor") == 0) {
 		*type = NL80211_IFTYPE_MONITOR;
 		return 0;
@@ -165,6 +160,7 @@ nla_put_failure:
 }
 
 static int handle_interface_add(struct nl80211_state *state,
+				struct nl_cb *cb,
 				struct nl_msg *msg,
 				int argc, char **argv,
 				enum id_input id)
@@ -173,8 +169,6 @@ static int handle_interface_add(struct nl80211_state *state,
 	char *mesh_id = NULL;
 	enum nl80211_iftype type;
 	int tpset;
-	unsigned char mac_addr[ETH_ALEN];
-	int found_mac = 0;
 
 	if (argc < 1)
 		return 1;
@@ -187,7 +181,6 @@ static int handle_interface_add(struct nl80211_state *state,
 	if (tpset)
 		return tpset;
 
-try_another:
 	if (argc) {
 		if (strcmp(argv[0], "mesh_id") == 0) {
 			argc--;
@@ -198,17 +191,6 @@ try_another:
 			mesh_id = argv[0];
 			argc--;
 			argv++;
-		} else if (strcmp(argv[0], "addr") == 0) {
-			argc--;
-			argv++;
-			if (mac_addr_a2n(mac_addr, argv[0])) {
-				fprintf(stderr, "Invalid MAC address\n");
-				return 2;
-			}
-			argc--;
-			argv++;
-			found_mac = 1;
-			goto try_another;
 		} else if (strcmp(argv[0], "4addr") == 0) {
 			argc--;
 			argv++;
@@ -237,24 +219,23 @@ try_another:
 	NLA_PUT_U32(msg, NL80211_ATTR_IFTYPE, type);
 	if (mesh_id)
 		NLA_PUT(msg, NL80211_ATTR_MESH_ID, strlen(mesh_id), mesh_id);
-	if (found_mac)
-		NLA_PUT(msg, NL80211_ATTR_MAC, ETH_ALEN, mac_addr);
 
 	return 0;
  nla_put_failure:
 	return -ENOBUFS;
 }
-COMMAND(interface, add, "<name> type <type> [mesh_id <meshid>] [4addr on|off] [flags <flag>*] [addr <mac-addr>]",
+COMMAND(interface, add, "<name> type <type> [mesh_id <meshid>] [4addr on|off] [flags <flag>*]",
 	NL80211_CMD_NEW_INTERFACE, 0, CIB_PHY, handle_interface_add,
 	"Add a new virtual interface with the given configuration.\n"
 	IFACE_TYPES "\n\n"
 	"The flags are only used for monitor interfaces, valid flags are:\n"
 	VALID_FLAGS "\n\n"
 	"The mesh_id is used only for mesh mode.");
-COMMAND(interface, add, "<name> type <type> [mesh_id <meshid>] [4addr on|off] [flags <flag>*] [addr <mac-addr>]",
+COMMAND(interface, add, "<name> type <type> [mesh_id <meshid>] [4addr on|off] [flags <flag>*]",
 	NL80211_CMD_NEW_INTERFACE, 0, CIB_NETDEV, handle_interface_add, NULL);
 
 static int handle_interface_del(struct nl80211_state *state,
+				struct nl_cb *cb,
 				struct nl_msg *msg,
 				int argc, char **argv,
 				enum id_input id)
@@ -372,17 +353,19 @@ static int print_iface_handler(struct nl_msg *msg, void *arg)
 }
 
 static int handle_interface_info(struct nl80211_state *state,
+				 struct nl_cb *cb,
 				 struct nl_msg *msg,
 				 int argc, char **argv,
 				 enum id_input id)
 {
-	register_handler(print_iface_handler, NULL);
+	nl_cb_set(cb, NL_CB_VALID, NL_CB_CUSTOM, print_iface_handler, NULL);
 	return 0;
 }
 TOPLEVEL(info, NULL, NL80211_CMD_GET_INTERFACE, 0, CIB_NETDEV, handle_interface_info,
 	 "Show information for this interface.");
 
 static int handle_interface_set(struct nl80211_state *state,
+				struct nl_cb *cb,
 				struct nl_msg *msg,
 				int argc, char **argv,
 				enum id_input id)
@@ -413,6 +396,7 @@ COMMAND(set, monitor, "<flag>*",
 	VALID_FLAGS);
 
 static int handle_interface_meshid(struct nl80211_state *state,
+				   struct nl_cb *cb,
 				   struct nl_msg *msg,
 				   int argc, char **argv,
 				   enum id_input id)
@@ -436,18 +420,20 @@ COMMAND(set, meshid, "<meshid>",
 static unsigned int dev_dump_wiphy;
 
 static int handle_dev_dump(struct nl80211_state *state,
+			   struct nl_cb *cb,
 			   struct nl_msg *msg,
 			   int argc, char **argv,
 			   enum id_input id)
 {
 	dev_dump_wiphy = -1;
-	register_handler(print_iface_handler, &dev_dump_wiphy);
+	nl_cb_set(cb, NL_CB_VALID, NL_CB_CUSTOM, print_iface_handler, &dev_dump_wiphy);
 	return 0;
 }
 TOPLEVEL(dev, NULL, NL80211_CMD_GET_INTERFACE, NLM_F_DUMP, CIB_NONE, handle_dev_dump,
 	 "List all network interfaces for wireless hardware.");
 
 static int handle_interface_type(struct nl80211_state *state,
+				 struct nl_cb *cb,
 				 struct nl_msg *msg,
 				 int argc, char **argv,
 				 enum id_input id)
@@ -474,6 +460,7 @@ COMMAND(set, type, "<type>",
 	IFACE_TYPES);
 
 static int handle_interface_4addr(struct nl80211_state *state,
+				  struct nl_cb *cb,
 				  struct nl_msg *msg,
 				  int argc, char **argv,
 				  enum id_input id)
@@ -487,6 +474,7 @@ COMMAND(set, 4addr, "<on|off>",
 	"Set interface 4addr (WDS) mode.");
 
 static int handle_interface_noack_map(struct nl80211_state *state,
+				      struct nl_cb *cb,
 				      struct nl_msg *msg,
 				      int argc, char **argv,
 				      enum id_input id)
@@ -514,6 +502,7 @@ COMMAND(set, noack_map, "<map>",
 
 
 static int handle_interface_wds_peer(struct nl80211_state *state,
+				     struct nl_cb *cb,
 				     struct nl_msg *msg,
 				     int argc, char **argv,
 				     enum id_input id)
@@ -545,6 +534,7 @@ COMMAND(set, peer, "<MAC address>",
 	"Set interface WDS peer.");
 
 static int set_mcast_rate(struct nl80211_state *state,
+			  struct nl_cb *cb,
 			  struct nl_msg *msg,
 			  int argc, char **argv,
 			  enum id_input id)

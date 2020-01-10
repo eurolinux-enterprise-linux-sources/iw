@@ -9,7 +9,7 @@
 #include "nl80211.h"
 #include "iw.h"
 
-static int iw_conn(struct nl80211_state *state,
+static int iw_conn(struct nl80211_state *state, struct nl_cb *cb,
 		   struct nl_msg *msg, int argc, char **argv,
 		   enum id_input id)
 {
@@ -59,6 +59,7 @@ static int iw_conn(struct nl80211_state *state,
 }
 
 static int disconnect(struct nl80211_state *state,
+		      struct nl_cb *cb,
 		      struct nl_msg *msg,
 		      int argc, char **argv,
 		      enum id_input id)
@@ -69,7 +70,7 @@ TOPLEVEL(disconnect, NULL,
 	NL80211_CMD_DISCONNECT, 0, CIB_NETDEV, disconnect,
 	"Disconnect from the current network.");
 
-static int iw_connect(struct nl80211_state *state,
+static int iw_connect(struct nl80211_state *state, struct nl_cb *cb,
 		      struct nl_msg *msg, int argc, char **argv,
 		      enum id_input id)
 {
@@ -93,14 +94,14 @@ static int iw_connect(struct nl80211_state *state,
 		argv++;
 	}
 
-	err = __prepare_listen_events(state);
-	if (err)
-		return err;
-
 	conn_argc = 3 + argc;
 	conn_argv = calloc(conn_argc, sizeof(*conn_argv));
 	if (!conn_argv)
 		return -ENOMEM;
+
+	err = __prepare_listen_events(state);
+	if (err)
+		return err;
 
 	conn_argv[0] = dev;
 	conn_argv[1] = "connect";
@@ -145,7 +146,7 @@ TOPLEVEL(connect, "[-w] <SSID> [<freq in MHz>] [<bssid>] [key 0:abcde d:1:616263
 	"With -w, wait for the connect to finish or fail.");
 HIDDEN(connect, establish, "", NL80211_CMD_CONNECT, 0, CIB_NETDEV, iw_conn);
 
-static int iw_auth(struct nl80211_state *state,
+static int iw_auth(struct nl80211_state *state, struct nl_cb *cb,
 		   struct nl_msg *msg, int argc, char **argv,
 		   enum id_input id)
 {

@@ -98,6 +98,7 @@ static int link_bss_handler(struct nl_msg *msg, void *arg)
 }
 
 static int handle_scan_for_link(struct nl80211_state *state,
+				struct nl_cb *cb,
 				struct nl_msg *msg,
 				int argc, char **argv,
 				enum id_input id)
@@ -105,7 +106,7 @@ static int handle_scan_for_link(struct nl80211_state *state,
 	if (argc > 0)
 		return 1;
 
-	register_handler(link_bss_handler, &lr);
+	nl_cb_set(cb, NL_CB_VALID, NL_CB_CUSTOM, link_bss_handler, &lr);
 	return 0;
 }
 
@@ -164,7 +165,7 @@ static int print_link_sta(struct nl_msg *msg, void *arg)
 	if (sinfo[NL80211_STA_INFO_TX_BITRATE]) {
 		char buf[100];
 
-		parse_bitrate(sinfo[NL80211_STA_INFO_TX_BITRATE], buf, sizeof(buf));
+		parse_tx_bitrate(sinfo[NL80211_STA_INFO_TX_BITRATE], buf, sizeof(buf));
 		printf("\ttx bitrate: %s\n", buf);
 	}
 
@@ -198,6 +199,7 @@ static int print_link_sta(struct nl_msg *msg, void *arg)
 }
 
 static int handle_link_sta(struct nl80211_state *state,
+			   struct nl_cb *cb,
 			   struct nl_msg *msg,
 			   int argc, char **argv,
 			   enum id_input id)
@@ -220,14 +222,14 @@ static int handle_link_sta(struct nl80211_state *state,
 
 	NLA_PUT(msg, NL80211_ATTR_MAC, ETH_ALEN, mac_addr);
 
-	register_handler(print_link_sta, NULL);
+	nl_cb_set(cb, NL_CB_VALID, NL_CB_CUSTOM, print_link_sta, NULL);
 
 	return 0;
  nla_put_failure:
 	return -ENOBUFS;
 }
 
-static int handle_link(struct nl80211_state *state,
+static int handle_link(struct nl80211_state *state, struct nl_cb *cb,
 		       struct nl_msg *msg, int argc, char **argv,
 		       enum id_input id)
 {

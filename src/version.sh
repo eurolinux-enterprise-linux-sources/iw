@@ -1,11 +1,11 @@
 #!/bin/sh
 
-VERSION="4.3"
+VERSION="3.10"
 OUT="$1"
 
-if [ -d .git ] && head=`git rev-parse --verify HEAD 2>/dev/null`; then
+if head=`git rev-parse --verify HEAD 2>/dev/null`; then
 	git update-index --refresh --unmerged > /dev/null
-	descr=$(git describe --match=v*)
+	descr=$(git describe)
 
 	# on git builds check that the version number above
 	# is correct...
